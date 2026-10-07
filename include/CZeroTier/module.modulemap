@@ -1,0 +1,5 @@
+framework module CZeroTier [system] {
+    umbrella header "CZeroTier.h"
+    link "c++"
+    export *
+}

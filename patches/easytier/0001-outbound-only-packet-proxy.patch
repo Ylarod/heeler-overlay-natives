@@ -1,0 +1,71 @@
+Heeler: make EasyTier's packet proxy outbound-only.
+
+Heeler's node only dials out. Upstream, the TCP, UDP, and ICMP proxy engines
+honour the exit-node bit a peer sets on its own packets without checking that
+this node enabled exit-node service, and in no-TUN mode the TCP and UDP
+engines forward a peer's connection to this node's virtual IP to 127.0.0.1. Either would let any peer
+on the network reach the phone's LAN or loopback services.
+
+After this patch an exit-node packet is proxied only when this node set
+enable_exit_node (Heeler never does), and the no-TUN virtual-IP-to-loopback
+forwarding is gone; a ping of the node's own virtual IP is still answered
+locally. Subnet proxying through this node's own proxy_networks is
+unchanged (Heeler configures none).
+
+The CEasyTier build does not start the packet proxy at all (EasyTier starts it
+only with its KCP or QUIC proxy compiled in), so this is defence in depth;
+`cargo run --release --features packet-proxy --example security` turns the
+proxy on and shows the patch closing both paths.
+
+Applies to EasyTier commit 728ba94b5029240add6204eed591f22e4e039e6b with
+`patch -p1 --fuzz=0`.
+
+--- a/easytier-core/src/gateway/proxy/tcp_proxy_engine.rs
++++ b/easytier-core/src/gateway/proxy/tcp_proxy_engine.rs
+@@ -553,8 +553,11 @@
+                 if let Some(real_ip) = self.cidr_table.lookup_v4(origin_ip) {
+                     return Some(real_ip);
+                 }
+-                let no_tun_local_virtual_ip = ctx.no_tun && Some(origin_ip) == ctx.virtual_ipv4;
+-                (is_exit_node || no_tun_local_virtual_ip).then_some(origin_ip)
++                // Heeler: a packet's exit-node bit is set by its sender, so it
++                // only counts when this node itself enabled exit-node service,
++                // and peers never reach this node's loopback through its
++                // virtual IP in no-TUN mode. The node only dials out.
++                (is_exit_node && ctx.enable_exit_node).then_some(origin_ip)
+             }
+             TcpProxyMode::KcpSrc | TcpProxyMode::QuicSrc => Some(origin_ip),
+         }
+--- a/easytier-core/src/gateway/proxy/udp_proxy_engine.rs
++++ b/easytier-core/src/gateway/proxy/udp_proxy_engine.rs
+@@ -219,11 +219,11 @@
+ 
+         let origin_dst_ip = ipv4.dst_addr();
+         let mut real_dst_ip = origin_dst_ip;
+-        let no_tun_local_virtual_ip =
+-            ctx.no_tun && Some(origin_dst_ip) == ctx.virtual_ipv4.as_ref().copied();
++        // Heeler: exit-node forwarding needs this node's own consent, and
++        // no-TUN virtual-IP-to-loopback forwarding is off (outbound only).
+         if let Some(mapped_real_ip) = self.cidr_table.lookup_v4(origin_dst_ip) {
+             real_dst_ip = mapped_real_ip;
+-        } else if !is_exit_node && !no_tun_local_virtual_ip {
++        } else if !(is_exit_node && ctx.enable_exit_node) {
+             return UdpProxyAction::Pass;
+         }
+ 
+--- a/easytier-core/src/gateway/proxy/icmp_proxy_engine.rs
++++ b/easytier-core/src/gateway/proxy/icmp_proxy_engine.rs
+@@ -92,7 +92,12 @@
+         let mapped_destination = ipv4.dst_addr();
+         let real_destination = self.cidr_table.lookup_v4(mapped_destination);
+         let is_local_no_tun = context.no_tun && mapped_destination == virtual_ipv4;
+-        if real_destination.is_none() && !header.is_exit_node() && !is_local_no_tun {
++        // Heeler: exit-node forwarding needs this node's own consent. A ping
++        // of this node's own virtual IP is still answered locally.
++        if real_destination.is_none()
++            && !(header.is_exit_node() && context.enable_exit_node)
++            && !is_local_no_tun
++        {
+             return IcmpProxyAction::Pass;
+         }
+ 

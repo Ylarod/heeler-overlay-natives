@@ -1,0 +1,4 @@
+# EasyTier tree with patches/easytier applied, written by scripts/easytier-dev.sh.
+/vendor/
+/target/
+/out/

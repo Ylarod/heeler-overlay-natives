@@ -1,0 +1,212 @@
+Heeler: verify config-server wss:// certificates.
+
+Upstream's wss:// client accepts any certificate (SkipServerVerification) and
+sends "localhost" as the server name for an IP address, so TLS gives no
+protection against an active attacker. Heeler uses wss:// to reach EasyTier
+config servers, which hand out network secrets, so that connection must be
+authenticated.
+
+After this patch a GlobalCtx can ask for verified wss:// connections
+(`set_verify_wss_server`), and `run_web_client_with_backend` (patch 0002) does
+so for its config-server connector: the client verifies the server's chain and
+name with rustls-platform-verifier, the operating system's trust store
+(Security framework on Apple platforms, including user-installed profiles). The
+name checked is the URL's host, a DNS name or an IP address. Self-signed
+config servers are refused.
+
+wss:// peers keep upstream's behaviour: EasyTier authenticates peers with the
+network secret inside the tunnel, and listeners serve a self-signed
+certificate by default. The wss:// listener is unchanged.
+
+Applies to EasyTier commit 728ba94b5029240add6204eed591f22e4e039e6b, after
+0001 and 0002, with `patch -p1 --fuzz=0`.
+
+--- a/easytier/Cargo.toml
++++ b/easytier/Cargo.toml
+@@ -109,6 +109,8 @@ http = { version = "1", default-features = false, features = [
+     "std",
+ ], optional = true }
+ rcgen = { version = "0.14.10", optional = true }
++# Heeler: verifies config-server wss:// certificates with the system trust store.
++rustls-platform-verifier = { version = "0.7", optional = true }
+ tokio-rustls = { workspace = true, optional = true }
+ 
+ # for tap device
+@@ -370,6 +372,7 @@ websocket = [
+     "dep:forwarded-header-value",
+     "dep:http",
+     "dep:rcgen",
++    "dep:rustls-platform-verifier",
+     "dep:tokio-rustls",
+     "dep:rustls",
+     "easytier-proto/websocket",
+--- a/easytier/src/common/global_ctx.rs
++++ b/easytier/src/common/global_ctx.rs
+@@ -1,7 +1,10 @@
+ use std::{
+     collections::HashSet,
+     net::{IpAddr, Ipv6Addr},
+-    sync::{Arc, Mutex},
++    sync::{
++        Arc, Mutex,
++        atomic::{AtomicBool, Ordering},
++    },
+ };
+ 
+ use arc_swap::ArcSwap;
+@@ -94,6 +97,10 @@ pub struct GlobalCtx {
+ 
+     flags: ArcSwap<Flags>,
+     runtime_endpoint_protocols: Option<HashSet<String>>,
++
++    // Heeler: wss:// connections made through this context verify the server
++    // certificate (set for config-server clients only).
++    verify_wss_server: AtomicBool,
+ }
+ 
+ impl std::fmt::Debug for GlobalCtx {
+@@ -208,9 +215,21 @@ impl GlobalCtx {
+ 
+             flags: ArcSwap::new(Arc::new(flags)),
+             runtime_endpoint_protocols,
++
++            verify_wss_server: AtomicBool::new(false),
+         }
+     }
+ 
++    /// Heeler: makes wss:// connectors created through this context afterwards
++    /// verify the server's certificate and name.
++    pub fn set_verify_wss_server(&self, verify: bool) {
++        self.verify_wss_server.store(verify, Ordering::Release);
++    }
++
++    pub fn verify_wss_server(&self) -> bool {
++        self.verify_wss_server.load(Ordering::Acquire)
++    }
++
+     pub(crate) fn runtime_ipv4(peer: &PeerRuntimeSnapshot) -> Option<cidr::Ipv4Inet> {
+         let prefix = peer.runtime.core.routes.ipv4.as_ref()?;
+         let IpAddr::V4(address) = prefix.address else {
+--- a/easytier/src/tunnel/protocol/adapters/websocket.rs
++++ b/easytier/src/tunnel/protocol/adapters/websocket.rs
+@@ -24,18 +24,23 @@ use crate::{
+ use super::{ClientAdapter, ServerAdapter};
+ 
+ #[derive(Default)]
+-struct WebSocketAdapter;
++struct WebSocketAdapter {
++    // Heeler: verify wss:// server certificates (config-server clients).
++    verify_server: bool,
++}
+ 
+ fn supports_scheme(scheme: &str) -> bool {
+     matches!(scheme, "ws" | "wss")
+ }
+ 
+-pub(super) fn client_adapter(_global_ctx: &ArcGlobalCtx) -> ClientAdapter {
+-    Arc::new(WebSocketAdapter)
++pub(super) fn client_adapter(global_ctx: &ArcGlobalCtx) -> ClientAdapter {
++    Arc::new(WebSocketAdapter {
++        verify_server: global_ctx.verify_wss_server(),
++    })
+ }
+ 
+ pub(super) fn server_adapter(_global_ctx: &ArcGlobalCtx) -> ServerAdapter {
+-    Arc::new(WebSocketAdapter)
++    Arc::new(WebSocketAdapter::default())
+ }
+ 
+ #[async_trait]
+@@ -56,7 +61,7 @@ impl ClientProtocolUpgrader<RuntimeTcpSocket> for WebSocketAdapter {
+         let ConnectedTransport::Tcp(socket) = connected else {
+             anyhow::bail!("WebSocket protocol requires a TCP transport");
+         };
+-        Ok(upgrade_connected(socket, requested_url).await?)
++        Ok(upgrade_connected(socket, requested_url, self.verify_server).await?)
+     }
+ }
+ 
+--- a/easytier/src/tunnel/websocket.rs
++++ b/easytier/src/tunnel/websocket.rs
+@@ -199,6 +199,26 @@ fn get_insecure_tls_client_config() -> rustls::ClientConfig {
+     config
+ }
+ 
++/// Heeler: verifies the server's certificate chain and name against the
++/// operating system's trust store, for config-server connections.
++fn get_verifying_tls_client_config() -> Result<rustls::ClientConfig, TunnelError> {
++    init_crypto_provider();
++    let provider = rustls::crypto::CryptoProvider::get_default()
++        .cloned()
++        .ok_or_else(|| TunnelError::InternalError("no TLS crypto provider".to_owned()))?;
++    let verifier = rustls_platform_verifier::Verifier::new(provider.clone())
++        .map_err(|error| TunnelError::InternalError(format!("TLS verifier: {error}")))?;
++    let mut config = rustls::ClientConfig::builder_with_provider(provider)
++        .with_safe_default_protocol_versions()
++        .map_err(|error| TunnelError::InternalError(format!("TLS versions: {error}")))?
++        .dangerous()
++        .with_custom_certificate_verifier(Arc::new(verifier))
++        .with_no_client_auth();
++    config.enable_sni = true;
++    config.enable_early_data = false;
++    Ok(config)
++}
++
+ fn get_insecure_tls_cert<'a>() -> (
+     Vec<rustls::pki_types::CertificateDer<'a>>,
+     rustls::pki_types::PrivateKeyDer<'a>,
+@@ -365,6 +385,7 @@ impl easytier_core::socket::SocketListener for WsTunnelListener {
+ pub(crate) async fn upgrade_connected<S>(
+     stream: S,
+     remote_url: url::Url,
++    verify_server: bool,
+ ) -> Result<Box<dyn Tunnel>, TunnelError>
+ where
+     S: VirtualTcpSocket,
+@@ -391,10 +412,30 @@ where
+         .max_headers(128);
+     let stream: MaybeTlsStream<S> = if is_wss {
+         init_crypto_provider();
+-        let tls = tokio_rustls::TlsConnector::from(Arc::new(get_insecure_tls_client_config()));
+-        let sni = remote_url.domain().unwrap_or("localhost").to_owned();
+-        let server_name = rustls::pki_types::ServerName::try_from(sni)
+-            .map_err(|_| TunnelError::InvalidProtocol("Invalid SNI".to_owned()))?;
++        // Heeler: a verified connection checks the certificate against the
++        // URL's host, a name or an IP address (not "localhost").
++        let (config, server_name) = if verify_server {
++            let server_name = match remote_url.host() {
++                Some(url::Host::Domain(domain)) => {
++                    rustls::pki_types::ServerName::try_from(domain.to_owned())
++                        .map_err(|_| TunnelError::InvalidProtocol("Invalid SNI".to_owned()))?
++                }
++                Some(url::Host::Ipv4(ip)) => {
++                    rustls::pki_types::ServerName::IpAddress(IpAddr::V4(ip).into())
++                }
++                Some(url::Host::Ipv6(ip)) => {
++                    rustls::pki_types::ServerName::IpAddress(IpAddr::V6(ip).into())
++                }
++                None => return Err(TunnelError::InvalidProtocol("wss:// needs a host".to_owned())),
++            };
++            (get_verifying_tls_client_config()?, server_name)
++        } else {
++            let sni = remote_url.domain().unwrap_or("localhost").to_owned();
++            let server_name = rustls::pki_types::ServerName::try_from(sni)
++                .map_err(|_| TunnelError::InvalidProtocol("Invalid SNI".to_owned()))?;
++            (get_insecure_tls_client_config(), server_name)
++        };
++        let tls = tokio_rustls::TlsConnector::from(Arc::new(config));
+         MaybeTlsStream::Rustls(tls.connect(server_name, stream).await?)
+     } else {
+         MaybeTlsStream::Plain(stream)
+--- a/easytier/src/web_client/mod.rs
++++ b/easytier/src/web_client/mod.rs
+@@ -178,6 +178,9 @@ pub fn run_web_client_with_backend(
+     flags.bind_device = false;
+     config.set_flags(flags.clone());
+     global_ctx.set_flags(flags);
++    // Heeler: the config server hands out network secrets, so a wss:// server
++    // must present a certificate the system trusts for its name.
++    global_ctx.set_verify_wss_server(true);
+     let connector = runtime_one_shot_manual_connector(
+         global_ctx,
+         &config,

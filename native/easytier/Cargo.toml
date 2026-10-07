@@ -1,0 +1,74 @@
+# heeler-easytier: the C ABI Heeler uses to run one in-process, TUN-less
+# EasyTier node and dial TCP through its userspace (smoltcp) data plane.
+#
+# Copyright (C) 2026 Heeler contributors
+#
+# This crate statically links EasyTier, which is licensed under the GNU Lesser
+# General Public License v3.0 or later; this crate is released under the same
+# terms. See LICENSE (LGPL-3.0) and ../../licenses/gpl-3.0.txt.
+
+[package]
+name = "heeler-easytier"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "LGPL-3.0-or-later"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# vendor/easytier is EasyTier commit 728ba94b (submodule upstream/EasyTier,
+# pinned in sources.lock) with patches/easytier applied; run
+# scripts/easytier-dev.sh before any cargo command in this directory.
+easytier = { path = "vendor/easytier/easytier", default-features = false, features = [
+    "smoltcp",
+    "aes-gcm",
+    "dhcp-ipv4",
+    # The config-server (EasyTier Web) client only; not `management`, which
+    # would expose EasyTier's whole management RPC and file storage.
+    "web-client",
+    # ws:// and wss:// config servers (and outbound peers); config-server wss
+    # certificates are verified against the system trust store (patch 0003),
+    # peers' are not (they authenticate with the network secret).
+    "websocket",
+] }
+easytier-core = { path = "vendor/easytier/easytier-core", default-features = false, features = [
+    "proxy-smoltcp-stack",
+    "dhcp-ipv4",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync"] }
+libc = "0.2"
+anyhow = "1"
+serde_json = "1"
+async-trait = "0.1"
+uuid = "1"
+
+[dev-dependencies]
+# examples/webconfig: a wss:// server with a self-signed certificate.
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+[features]
+# Test only, never in shipped builds: compiles EasyTier's KCP proxy, which
+# makes EasyTier start its packet proxy (TCP/UDP/ICMP NAT engines).
+# `cargo run --release --features packet-proxy --example security` uses it as
+# the positive control for the outbound-only patch.
+packet-proxy = ["easytier/kcp"]
+
+[profile.release]
+# "z" links about 1.9 MB smaller than "s" on iPhoneOS arm64 (6.9 vs 8.8 MB
+# stripped); throughput is bounded by the overlay path, not this code.
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+# Unwinding stays on so every exported function can stop a panic at the FFI
+# boundary with catch_unwind instead of aborting the app.
+panic = "unwind"
+strip = "debuginfo"
+debug = false
+
+[workspace]
+exclude = ["vendor"]

@@ -1,0 +1,6 @@
+# EasyTier 728ba94b declares rust-version 1.95; the shipped artifacts are
+# built with exactly this toolchain.
+[toolchain]
+channel = "1.95.0"
+profile = "minimal"
+targets = ["aarch64-apple-ios", "aarch64-apple-ios-sim"]

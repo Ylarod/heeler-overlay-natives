@@ -1,0 +1,4 @@
+framework module CEasyTier [system] {
+    umbrella header "CEasyTier.h"
+    export *
+}

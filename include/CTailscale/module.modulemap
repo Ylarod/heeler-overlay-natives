@@ -1,0 +1,4 @@
+framework module CTailscale [system] {
+    umbrella header "CTailscale.h"
+    export *
+}

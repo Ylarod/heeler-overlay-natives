@@ -1,0 +1,127 @@
+Heeler: let the embedding host serve a config server's reverse RPC.
+
+`easytier-core --config-server` registers EasyTier's whole process-management
+RPC with the server: it can run any number of instances with any
+configuration and hot-patch a running one (port forwards, subnet proxies, exit
+nodes, mapped listeners, relay flags). Heeler's node only dials out, so it
+serves its own, narrower surface instead, and checks every configuration a
+server sends against the same outbound-only policy as a local one.
+
+This patch only widens visibility and adds one constructor; no upstream
+behaviour changes:
+- `WebClientBackend` and `WebClient::with_backend`, already used by the WASI
+  host, are public on every target;
+- `easytier::web_client::run_web_client_with_backend` builds the
+  config-server connector (udp, tcp, ws, wss) as `run_web_client` does and
+  hands it to `with_backend` with an explicit machine ID.
+
+Applies to EasyTier commit 728ba94b5029240add6204eed591f22e4e039e6b, after
+0001, with `patch -p1 --fuzz=0`.
+
+--- a/easytier-core/src/management/full/mod.rs
++++ b/easytier-core/src/management/full/mod.rs
+@@ -47,9 +47,7 @@ pub use process_rpc::{
+     ConfigFileStorage, InstanceMutationHooks, InstanceMutationResult, ProcessManagement,
+     ProcessManagementRpc, UnsupportedConfigFileStorage,
+ };
+-#[cfg(target_os = "wasi")]
+-pub(crate) use web_client::WebClientBackend;
+-pub use web_client::{ConfigServerEndpoint, WebClient, WebClientConfig};
++pub use web_client::{ConfigServerEndpoint, WebClient, WebClientBackend, WebClientConfig};
+ 
+ #[cfg(feature = "management")]
+ pub use super::instance_rpc::full::call_instance_json_rpc;
+--- a/easytier-core/src/management/full/web_client.rs
++++ b/easytier-core/src/management/full/web_client.rs
+@@ -154,8 +154,9 @@ pub struct WebClientConfig {
+     pub secure_mode: bool,
+ }
+ 
++/// The reverse-RPC surface and instance view a config-server client serves.
+ #[async_trait]
+-pub(crate) trait WebClientBackend: Send + Sync + 'static {
++pub trait WebClientBackend: Send + Sync + 'static {
+     fn register(&self, registry: &ServiceRegistry);
+ 
+     async fn instance_ids(&self) -> anyhow::Result<Vec<uuid::Uuid>>;
+@@ -267,9 +268,10 @@ where
+     }
+ }
+ 
+-#[cfg(target_os = "wasi")]
+ impl WebClient<()> {
+-    pub(crate) fn with_backend<T: TunnelDialer + 'static>(
++    /// A config-server client that serves `backend` instead of the
++    /// process-management RPC over an InstanceManager.
++    pub fn with_backend<T: TunnelDialer + 'static>(
+         connector: T,
+         config: WebClientConfig,
+         backend: Arc<dyn WebClientBackend>,
+--- a/easytier-core/src/management/mod.rs
++++ b/easytier-core/src/management/mod.rs
+@@ -26,8 +26,6 @@ pub use crate::instance::manager::{
+ pub(crate) use forwarded_rpc::{
+     ManagementRpcForwarder, register_forwarded_instance_management_rpc,
+ };
+-#[cfg(all(feature = "management", target_os = "wasi"))]
+-pub(crate) use full::WebClientBackend;
+ #[cfg(all(feature = "web-client", test))]
+ pub(crate) use full::register_web_client_rpc;
+ #[cfg(feature = "management")]
+@@ -36,7 +34,7 @@ pub use full::remote_client;
+ pub use full::{
+     ConfigFileStorage, ConfigPatchPersistence, ConfigServerEndpoint, InstanceMutationHooks,
+     InstanceMutationResult, ProcessManagement, ProcessManagementRpc, UnsupportedConfigFileStorage,
+-    WebClient, WebClientConfig, apply_config_patch, config_source_from_rpc, config_source_to_rpc,
++    WebClient, WebClientBackend, WebClientConfig, apply_config_patch, config_source_from_rpc, config_source_to_rpc,
+     network_instance_running_info,
+ };
+ #[cfg(feature = "management")]
+--- a/easytier/src/web_client/mod.rs
++++ b/easytier/src/web_client/mod.rs
+@@ -161,6 +161,45 @@ pub async fn run_web_client(
+     ))
+ }
+ 
++/// Runs a config-server client that serves `backend`'s reverse RPC instead of
++/// EasyTier's process-management RPC, so the embedding host decides what a
++/// config server may run. `machine_id` is used as given.
++pub fn run_web_client_with_backend(
++    config_server_url: &str,
++    machine_id: uuid::Uuid,
++    hostname: String,
++    secure_mode: bool,
++    backend: Arc<dyn easytier_core::management::WebClientBackend>,
++) -> Result<easytier_core::management::WebClient<()>> {
++    let endpoint = parse_config_server_endpoint(config_server_url)?;
++    let config = TomlConfigLoader::default();
++    let global_ctx = Arc::new(GlobalCtx::new(config.clone()));
++    let mut flags = global_ctx.get_flags();
++    flags.bind_device = false;
++    config.set_flags(flags.clone());
++    global_ctx.set_flags(flags);
++    let connector = runtime_one_shot_manual_connector(
++        global_ctx,
++        &config,
++        easytier_core::process_runtime::CoreProcessRuntime::new(),
++    )?;
++    Ok(easytier_core::management::WebClient::with_backend(
++        ConfigServerConnector {
++            url: endpoint.connect_url().clone(),
++            connector,
++        },
++        WebClientConfig {
++            token: endpoint.token().to_owned(),
++            machine_id,
++            hostname,
++            device_os: web_client_device_os_info(),
++            easytier_version: EASYTIER_VERSION.to_owned(),
++            secure_mode,
++        },
++        backend,
++    ))
++}
++
+ #[cfg(test)]
+ mod tests {
+     use std::sync::{Arc, atomic::AtomicBool};

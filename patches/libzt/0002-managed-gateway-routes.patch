@@ -1,0 +1,313 @@
+Heeler: route ZeroTier managed routes through a gateway on the network.
+
+libzt never installs a network's managed routes in lwIP: syncManagedStuff
+syncs only addresses, each IPv4 netif gets gateway 127.0.0.1, and IPv4 has no
+default netif. A route such as 192.168.77.0/24 via 10.147.20.2 (a LAN behind
+a member) is therefore unreachable, and connect() times out.
+
+This patch:
+- has NodeService::syncManagedStuff hand the network config's IPv4 routes
+  that name an IPv4 gateway to the network's tap
+  (VirtualTap::setGatewayRoutes4);
+- adds VirtualTap::gatewayFor4, a longest-prefix match over those routes;
+- adds two lwIP hooks, declared and enabled in lwipopts.h
+  (LWIP_HOOK_IP4_ROUTE_SRC, LWIP_HOOK_ETHARP_GET_GW):
+  zts_lwip_hook_ip4_route_src keeps a packet whose source is a ZeroTier
+  netif's address on that netif, for a destination on its subnet or
+  covered by its own routes (one network's controller cannot route
+  another network's traffic, even with a more specific route or subnet);
+  when no netif reaches the destination lwIP reports no route as before.
+  Without a source (an unbound socket), a gateway route is used only while
+  a single IPv4 ZeroTier netif is up. zts_lwip_hook_etharp_get_gw returns
+  the chosen netif's gateway, from that netif's longest matching route
+  whose gateway is on its subnet, so ARP resolves its MAC instead of
+  127.0.0.1.
+
+Both hooks run on lwIP's tcpip thread with the core lock held. Heeler binds
+each connection to its network's address (heeler_zt_connect), so the
+source hook decides its route. An unbound socket's on-subnet traffic still
+matches a netif before the hook runs. IPv6 gateway routes are not handled,
+as before. Each changed file carries a "Modified by Heeler contributors"
+notice.
+
+Applies to libzt commit a707ea6ae0910efdc1125d04758c411e2e9ea4f9 (src/ only).
+
+--- a/src/NodeService.cpp
++++ b/src/NodeService.cpp
+@@ -11,6 +11,11 @@
+  */
+ /****/
+ 
++/*
++ * Modified by Heeler contributors (2026): syncManagedStuff hands the network's IPv4 routes
++ * through a gateway to the tap (managed gateway routes).
++ */
++
+ /**
+  * @file
+  *
+@@ -625,6 +630,28 @@
+         }
+     }
+     n.managedIps.swap(newManagedIps);
++
++    // Heeler: IPv4 routes through a gateway on this network, for lwIP's
++    // routing hooks (see VirtualTap::gatewayFor4).
++    std::vector<VirtualTap::GatewayRoute4> gatewayRoutes;
++    for (unsigned int i = 0; i < n.config.routeCount; ++i) {
++        const InetAddress* target = reinterpret_cast<const InetAddress*>(&(n.config.routes[i].target));
++        const InetAddress* via = reinterpret_cast<const InetAddress*>(&(n.config.routes[i].via));
++        if (! target->isV4() || ! via->isV4()) {
++            continue;
++        }
++        unsigned int bits = target->netmaskBits();
++        if (bits > 32) {
++            continue;
++        }
++        VirtualTap::GatewayRoute4 route;
++        route.bits = bits;
++        route.mask = bits == 0 ? 0 : htonl(0xffffffffU << (32 - bits));
++        route.network = *reinterpret_cast<const uint32_t*>(target->rawIpData()) & route.mask;
++        route.via = *reinterpret_cast<const uint32_t*>(via->rawIpData());
++        gatewayRoutes.push_back(route);
++    }
++    n.tap->setGatewayRoutes4(gatewayRoutes);
+ }
+ 
+ void NodeService::phyOnDatagram(
+--- a/src/VirtualTap.cpp
++++ b/src/VirtualTap.cpp
+@@ -11,6 +11,12 @@
+  */
+ /****/
+ 
++/*
++ * Modified by Heeler contributors (2026): IPv4 gateway routes (setGatewayRoutes4,
++ * gatewayFor4) and lwIP routing hooks for managed gateway routes, which keep
++ * each network's routes to traffic from its own address.
++ */
++
+ /**
+  * @file
+  *
+@@ -107,6 +113,29 @@
+ #endif
+ }
+ 
++void VirtualTap::setGatewayRoutes4(const std::vector<GatewayRoute4>& routes)
++{
++    Mutex::Lock _l(_gatewayRoutes4_m);
++    _gatewayRoutes4 = routes;
++}
++
++bool VirtualTap::gatewayFor4(uint32_t dest, uint32_t* via, unsigned int* bits)
++{
++    Mutex::Lock _l(_gatewayRoutes4_m);
++    bool found = false;
++    for (const GatewayRoute4& route : _gatewayRoutes4) {
++        if ((dest & route.mask) != route.network) {
++            continue;
++        }
++        if (! found || route.bits > *bits) {
++            *via = route.via;
++            *bits = route.bits;
++            found = true;
++        }
++    }
++    return found;
++}
++
+ void VirtualTap::lastConfigUpdate(uint64_t lastConfigUpdateTime)
+ {
+     _lastConfigUpdateTime = lastConfigUpdateTime;
+@@ -639,3 +668,107 @@
+ }
+ 
+ }   // namespace ZeroTier
++
++/*
++ * Heeler: lwIP routing hooks for ZeroTier managed routes through a gateway
++ * (a route with a `via`, e.g. a physical LAN behind a member). lwIP itself
++ * only reaches addresses on a netif's own subnet. Both run on lwIP's tcpip
++ * thread with the core locked, so netif_list is stable.
++ *
++ * Every joined network's controller sets its own routes, so one network's
++ * routes must never carry traffic meant for another: a socket bound to a
++ * network's address is routed only through that network, and an unbound one
++ * uses gateway routes only while a single network is up.
++ */
++
++static bool zts_netif4_usable(struct netif* n)
++{
++    return n && n->state && n->name[0] == '4' && netif_is_up(n) && netif_is_link_up(n)
++           && ! ip4_addr_isany_val(*netif_ip4_addr(n));
++}
++
++static bool zts_gateway_route4(struct netif* n, const ip4_addr_t* dest, ip4_addr_t* gw, unsigned int* bits)
++{
++    if (! zts_netif4_usable(n)) {
++        return false;
++    }
++    uint32_t via = 0;
++    if (! ((ZeroTier::VirtualTap*)n->state)->gatewayFor4(ip4_addr_get_u32(dest), &via, bits)) {
++        return false;
++    }
++    ip4_addr_set_u32(gw, via);
++    // The gateway must be reachable on the network itself.
++    return ip4_addr_netcmp(gw, netif_ip4_addr(n), netif_ip4_netmask(n));
++}
++
++// Whether `n` reaches `dest` itself: on its subnet or through one of its
++// own gateway routes.
++static bool zts_netif4_reaches(struct netif* n, const ip4_addr_t* dest)
++{
++    if (! zts_netif4_usable(n)) {
++        return false;
++    }
++    if (ip4_addr_netcmp(dest, netif_ip4_addr(n), netif_ip4_netmask(n))) {
++        return true;
++    }
++    ip4_addr_t gw;
++    unsigned int bits = 0;
++    return zts_gateway_route4(n, dest, &gw, &bits);
++}
++
++extern "C" struct netif* zts_lwip_hook_ip4_route_src(const ip4_addr_t* src, const ip4_addr_t* dest)
++{
++    struct netif* n;
++    if (src && ! ip4_addr_isany(src)) {
++        // Called by ip4_route_src before lwIP's own subnet match: a source
++        // that is a network's address keeps the packet on that network.
++        struct netif* own = NULL;
++        NETIF_FOREACH(n)
++        {
++            if (zts_netif4_usable(n) && ip4_addr_cmp(src, netif_ip4_addr(n))) {
++                own = n;
++                break;
++            }
++        }
++        if (! own) {
++            return NULL;   // Not a ZeroTier address: lwIP's own routing.
++        }
++        if (zts_netif4_reaches(own, dest)) {
++            return own;
++        }
++        // Its network has no route to dest. When another network has one,
++        // the packet still stays on its own (and goes unanswered) rather
++        // than leave through that one; when none has, lwIP reports no
++        // route at once.
++        NETIF_FOREACH(n)
++        {
++            if (n != own && zts_netif4_reaches(n, dest)) {
++                return own;
++            }
++        }
++        return NULL;
++    }
++    // No source (from ip4_route, after lwIP's subnet match failed): a
++    // gateway route is used only while one IPv4 network is up, so no
++    // network's route can take another's traffic.
++    struct netif* only = NULL;
++    NETIF_FOREACH(n)
++    {
++        if (zts_netif4_usable(n)) {
++            if (only) {
++                return NULL;
++            }
++            only = n;
++        }
++    }
++    ip4_addr_t gw;
++    unsigned int bits = 0;
++    return zts_gateway_route4(only, dest, &gw, &bits) ? only : NULL;
++}
++
++extern "C" const ip4_addr_t* zts_lwip_hook_etharp_get_gw(struct netif* n, const ip4_addr_t* dest)
++{
++    static thread_local ip4_addr_t gw;
++    unsigned int bits = 0;
++    return zts_gateway_route4(n, dest, &gw, &bits) ? &gw : NULL;
++}
+--- a/src/VirtualTap.hpp
++++ b/src/VirtualTap.hpp
+@@ -11,6 +11,10 @@
+  */
+ /****/
+ 
++/*
++ * Modified by Heeler contributors (2026): IPv4 gateway routes for managed gateway routes.
++ */
++
+ /**
+  * @file
+  *
+@@ -82,6 +86,31 @@
+                     // layer
+ 
+     void setUserEventSystem(Events* events);
++
++    /**
++     * An IPv4 managed route through a gateway on this network (Heeler):
++     * addresses in network byte order.
++     */
++    struct GatewayRoute4 {
++        uint32_t network;
++        uint32_t mask;
++        unsigned int bits;
++        uint32_t via;
++    };
++
++    /**
++     * Replaces this network's IPv4 gateway routes (from its config).
++     */
++    void setGatewayRoutes4(const std::vector<GatewayRoute4>& routes);
++
++    /**
++     * The gateway of the most specific route covering `dest` (network byte
++     * order) and that route's prefix length, if any route covers it.
++     */
++    bool gatewayFor4(uint32_t dest, uint32_t* via, unsigned int* bits);
++
++    Mutex _gatewayRoutes4_m;
++    std::vector<GatewayRoute4> _gatewayRoutes4;
+ 
+     /**
+      * Return whether this tap has been assigned an IPv4 address.
+--- a/src/lwipopts.h
++++ b/src/lwipopts.h
+@@ -30,6 +30,12 @@
+  *
+  */
+ 
++/*
++ * Modified by Heeler contributors (2026): declares and enables lwIP's
++ * IPv4 source-based routing and gateway hooks for ZeroTier managed gateway
++ * routes.
++ */
++
+ /**
+  * @file
+  *
+@@ -3450,5 +3456,22 @@
+ /**
+  * @}
+  */
++
++/*
++ * Heeler: ZeroTier managed routes through a gateway, implemented in
++ * VirtualTap.cpp (zts_lwip_hook_*).
++ */
++#ifdef __cplusplus
++extern "C" {
++#endif
++struct netif;
++struct ip4_addr;
++struct netif* zts_lwip_hook_ip4_route_src(const struct ip4_addr* src, const struct ip4_addr* dest);
++const struct ip4_addr* zts_lwip_hook_etharp_get_gw(struct netif* netif, const struct ip4_addr* dest);
++#ifdef __cplusplus
++}
++#endif
++#define LWIP_HOOK_IP4_ROUTE_SRC(src, dest)   zts_lwip_hook_ip4_route_src(src, dest)
++#define LWIP_HOOK_ETHARP_GET_GW(netif, dest) zts_lwip_hook_etharp_get_gw(netif, dest)
+ 
+ #endif /* LWIP_HDR_OPT_H */
