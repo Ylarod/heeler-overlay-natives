@@ -55,7 +55,7 @@ for library in "${SELECTED[@]}"; do
 done
 
 require_commands git curl shasum tar patch rsync make cmake xcodebuild xcrun codesign awk \
-    cargo rustup rustc python3
+    cargo rustup rustc python3 unzip
 [[ "$(uname -s)-$(uname -m)" == "Darwin-arm64" ]] \
     || die "the pinned Go toolchain is darwin-arm64; build on an Apple silicon Mac"
 [[ "$(sed -n 's/^channel = "\(.*\)"/\1/p' "${ROOT_DIR}/native/easytier/rust-toolchain.toml")" == "${EASYTIER_RUST_TOOLCHAIN}" ]] \
@@ -70,12 +70,13 @@ if [[ "${SOURCES_ONLY}" == "1" ]]; then
     scratch="$(mktemp -d "${TMPDIR:-/tmp}/heeler-natives-sources.XXXXXX")"
     trap 'rm -rf "${scratch}"' EXIT
     fetch_verified go "${GO_URL}" "${GO_SHA256}" >/dev/null
+    fetch_verified protoc "${PROTOC_URL}" "${PROTOC_SHA256}" >/dev/null
     export_tree "${ROOT_DIR}/upstream/libtailscale" "${LIBTAILSCALE_COMMIT}" "${scratch}/libtailscale"
     grep -Fxq "require tailscale.com ${LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION}" "${scratch}/libtailscale/go.mod" \
         || die "libtailscale no longer requires tailscale.com ${LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION}"
     prepare_libzt_source "${scratch}/libzt"
     sync_easytier_source "${scratch}/easytier"
-    echo "Verified the submodule pins, Go ${GO_VERSION}, the go.mod/go.sum overrides, the libzt and EasyTier patches, and the committed licence texts."
+    echo "Verified the submodule pins, Go ${GO_VERSION}, protoc ${PROTOC_VERSION}, the go.mod/go.sum overrides, the libzt and EasyTier patches, and the committed licence texts."
     exit 0
 fi
 

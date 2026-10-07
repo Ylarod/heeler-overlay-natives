@@ -67,6 +67,12 @@ EASYTIER_COMMIT="728ba94b5029240add6204eed591f22e4e039e6b"
 EASYTIER_PATCHES="0001-outbound-only-packet-proxy.patch:462f50093b32092c411c0584280dffccdc71cc528a55fddbbb0b46dd5d15c425 0002-web-client-backend.patch:efbb6003277fb3a835ed12537be8e719b3c41f97a638cf5dfdfdfbbbd87ed45b 0003-websocket-verify-server-certificates.patch:7d2d9822a1c411644cec3f393c7f07d17e43325217187ee6caad0ae7feb84fa5"
 # Rust toolchain (rustup channel); must match native/easytier/rust-toolchain.toml.
 EASYTIER_RUST_TOOLCHAIN="1.95.0"
+# protoc, run by EasyTier's build scripts (prost-build) to generate its
+# protobuf code; a build tool, not linked. Downloaded and verified; the
+# host's protoc is never used (PROTOC points at this one).
+PROTOC_VERSION="36.2"
+PROTOC_URL="https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-osx-aarch_64.zip"
+PROTOC_SHA256="9cd98a532c5c5e0c4161314de0225de27e4c8a323917b6ea7b1b714d3ae23466"
 
 # ---------------------------------------------------------------------------
 # Committed licence texts (verified, never downloaded by the build)

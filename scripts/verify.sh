@@ -199,6 +199,7 @@ for entry in ${ZEROTIER_PATCHES}; do
 done
 has "EasyTier: ${EASYTIER_VERSION}, commit ${EASYTIER_COMMIT}"
 has "Rust toolchain: rustc ${EASYTIER_RUST_TOOLCHAIN} "
+has "protoc: ${PROTOC_VERSION}, osx-aarch_64 archive sha256 ${PROTOC_SHA256}"
 has "Cargo.lock sha256 $(sha256_of "${ROOT_DIR}/native/easytier/Cargo.lock")"
 grep -Fxq -- "- EasyTier patches: ${EASYTIER_PATCHES}" "${provenance}" || die "PROVENANCE.md does not record the EasyTier patches"
 for entry in ${EASYTIER_PATCHES}; do

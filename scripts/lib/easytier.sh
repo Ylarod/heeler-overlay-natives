@@ -12,6 +12,7 @@ easytier_fingerprint() {
     echo "easytier: ${EASYTIER_VERSION} ${EASYTIER_COMMIT}"
     echo "patches: ${EASYTIER_PATCHES}"
     echo "rust-toolchain: ${EASYTIER_RUST_TOOLCHAIN}"
+    echo "protoc: ${PROTOC_VERSION} ${PROTOC_URL} ${PROTOC_SHA256}"
     if rustc +"${EASYTIER_RUST_TOOLCHAIN}" -vV >/dev/null 2>&1; then
         rustc +"${EASYTIER_RUST_TOOLCHAIN}" -vV | sed 's/^/rustc: /'
     else
@@ -64,6 +65,18 @@ install_rust_toolchain() {
         || die "rustc +${toolchain} reports $(rustc +"${toolchain}" --version)"
 }
 
+# The pinned protoc (with its well-known .proto includes), extracted from the
+# verified download into directory.
+install_protoc() {
+    local directory="$1" archive
+    archive="$(fetch_verified protoc "${PROTOC_URL}" "${PROTOC_SHA256}")"
+    rm -rf "${directory}"
+    mkdir -p "${directory}"
+    unzip -q "${archive}" -d "${directory}"
+    "${directory}/bin/protoc" --version | grep -Fxq "libprotoc ${PROTOC_VERSION}" \
+        || die "protoc reports $("${directory}/bin/protoc" --version), expected libprotoc ${PROTOC_VERSION}"
+}
+
 build_easytier() {
     local stage="$1"
     local work="${BUILD_DIR}/work/easytier"
@@ -77,6 +90,7 @@ build_easytier() {
     local crate="${work}/heeler-easytier"
     sync_easytier_crate "${crate}"
     install_rust_toolchain "${crate}"
+    install_protoc "${work}/protoc"
 
     local toolchain="${EASYTIER_RUST_TOOLCHAIN}"
     local objcopy
@@ -99,6 +113,7 @@ build_easytier() {
         sim_sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 
         export CARGO_TARGET_DIR="${target_dir}"
+        export PROTOC="${work}/protoc/bin/protoc" PROTOC_INCLUDE="${work}/protoc/include"
         export IPHONEOS_DEPLOYMENT_TARGET="${DEPLOYMENT_TARGET}"
         export CARGO_INCREMENTAL=0
         # EasyTier embeds `git describe` through git-version and falls back to
@@ -321,6 +336,7 @@ EOF
 - EasyTier patches: ${EASYTIER_PATCHES}
 - EasyTier licence: LGPL-3.0, linked statically through heeler-easytier (LGPL-3.0-or-later); LGPL-3.0 and GPL-3.0 texts in Notices
 - Rust toolchain: $(rustc +"${EASYTIER_RUST_TOOLCHAIN}" --version)
+- protoc: ${PROTOC_VERSION}, osx-aarch_64 archive sha256 ${PROTOC_SHA256} (code generation only)
 - heeler-easytier: native/easytier, Cargo.lock sha256 $(sha256_of "${ROOT_DIR}/${EASYTIER_CRATE_SOURCE}/Cargo.lock") enforced (--locked); features easytier smoltcp, aes-gcm, dhcp-ipv4, web-client, websocket; release opt-level z, thin LTO, codegen-units 1, panic unwind
 - heeler-easytier post-processing: __LLVM,__bitcode removed, Rust standard-library objects restamped to minos ${DEPLOYMENT_TARGET}, debug sections stripped
 - Rust crates linked: ${crate_count}

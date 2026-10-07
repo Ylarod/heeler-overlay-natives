@@ -28,6 +28,7 @@ the native code, its patches, and the build.
 | lwIP contrib | commit `4fd612c9c72dfcd1db6618bd59c1a17d9f5b55f8` (joseph-henry/lwip-contrib) | libzt's submodule `ext/lwip-contrib` |
 | EasyTier | 2.7.0 development commit `728ba94b5029240add6204eed591f22e4e039e6b` | submodule `upstream/EasyTier` |
 | Rust | 1.95.0 (rustup) | `native/easytier/rust-toolchain.toml`, `sources.lock` |
+| protoc | 36.2 osx-aarch_64 release, SHA-256 verified download (EasyTier's protobuf code generation) | `sources.lock` |
 | Xcode | 26.3 (17C529), iOS SDK 26.2, CMake 4.4.3 | recorded in `PROVENANCE.md` |
 
 EasyTier is pinned to a development commit ahead of 2.7.0. Once v2.7.0 is
@@ -129,6 +130,8 @@ the same):
   `BUILD_IOS_FRAMEWORK`), `strip -S -x`.
 - **CEasyTier**: `native/easytier` is copied to the work directory with
   `git archive` of EasyTier plus `patches/easytier` in `vendor/easytier`;
+  the pinned protoc is extracted beside it and named by `PROTOC` and
+  `PROTOC_INCLUDE` (no protoc on `PATH` is needed or used);
   `cargo build --locked --release` for `aarch64-apple-ios` and
   `aarch64-apple-ios-sim`; LLVM bitcode sections removed, Rust standard
   library objects restamped to minos 18.0 (`restamp-macho.py`), debug sections
@@ -140,7 +143,7 @@ applies `export-ignore` exactly as GitHub's archives do.
 
 ### Caches and skipping
 
-- **Downloads** (the Go toolchain; the archives `audit-upstream.sh` checks)
+- **Downloads** (the Go toolchain, protoc; the archives `audit-upstream.sh` checks)
   are cached in `~/Library/Caches/heeler-overlay-natives/downloads`
   (`HEELER_NATIVES_CACHE_DIR` moves the whole cache). A cached file is
   hashed on every use and replaced if it does not match.
@@ -238,8 +241,9 @@ update its hash in `sources.lock`, and run `scripts/build.sh --sources-only`.
 For local Rust work on the crate:
 
 ```sh
-scripts/easytier-dev.sh                  # patched EasyTier into native/easytier/vendor
+scripts/easytier-dev.sh                  # patched EasyTier and protoc into native/easytier/vendor
 cd native/easytier
+export PROTOC="$PWD/vendor/protoc/bin/protoc"
 cargo test --locked
 cargo run --locked --release --example e2e        # two nodes, banner + echo
 cargo run --locked --release --example security   # outbound-only regression
@@ -272,7 +276,8 @@ cargo run --locked --release --example multi-peer -- --web vendor/easytier/targe
    patches, regenerate `native/easytier/Cargo.lock`
    (`scripts/easytier-dev.sh && cd native/easytier && cargo update -p easytier`),
    and drop the "development commit" wording from `sources.lock`.
-5. **Toolchains**: Go (`GO_VERSION`, `GO_URL`, `GO_SHA256`), Rust
+5. **Toolchains**: Go (`GO_VERSION`, `GO_URL`, `GO_SHA256`), protoc
+   (`PROTOC_VERSION`, `PROTOC_URL`, `PROTOC_SHA256`), Rust
    (`rust-toolchain.toml`, `EASYTIER_RUST_TOOLCHAIN`, and new
    `licenses/rust-<version>/` texts with their hashes), or Xcode (CI's
    `DEVELOPER_DIR`). Any of them changes the bytes.
