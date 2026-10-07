@@ -1,0 +1,168 @@
+Heeler: start the metrics saver thread only while metrics are written.
+
+ZeroTierOne 1.16 links prometheus-cpp-lite's SaveToFile as a global
+(prometheus::simpleapi::saver in node/Metrics.cpp). Its thread starts with
+the object, during static initialization, so in any process that links
+libzt from launch on, whether or not ZeroTier is ever used; it wakes every
+1/100 of its period (10 ms by default, 100 ms once libzt's NodeService
+lengthens it) to check for work, even with no registry to save. Heeler
+never enables metrics (zts_init_enable_metrics), so that thread only costs
+wakeups on a phone.
+
+This patch changes SaveToFile (core/include/prometheus/save_to_file.h):
+- no thread at construction; set_registry with a registry starts it,
+  set_registry without one stops it (after a last save, as stopping did);
+- the thread sleeps on a condition variable for the whole period and is
+  woken at once to stop, instead of polling;
+- period, file name, and registry are guarded by a mutex.
+
+libzt's zts_init_enable_metrics still works: NodeService sets the registry
+when metrics are enabled and clears it when the node stops. The changed
+file carries a "Modified by Heeler contributors" notice.
+
+Applies to ZeroTierOne fc5c3ec22090b5b2a0f274e863651fe9ca489bf4 (1.16.2) in
+libzt's ext/ZeroTierOne (ext/prometheus-cpp-lite-1.0 only).
+
+--- a/ext/ZeroTierOne/ext/prometheus-cpp-lite-1.0/core/include/prometheus/save_to_file.h
++++ b/ext/ZeroTierOne/ext/prometheus-cpp-lite-1.0/core/include/prometheus/save_to_file.h
+@@ -1,7 +1,16 @@
++/*
++ * Modified by Heeler contributors (2026): the saver thread runs only while a
++ * registry is set and sleeps on a condition variable between saves, instead of
++ * starting with the object (from static initialization) and waking every
++ * 1/100 of its period whether or not anything is saved.
++ */
++
+ #pragma once
+ 
+ #include <thread>
+ #include <chrono>
++#include <condition_variable>
++#include <mutex>
+ #include <string>
+ #include <fstream>
+ #include <memory>
+@@ -13,10 +22,14 @@
+   class SaveToFile {
+     std::chrono::seconds      period        { 1 };
+     std::string               filename;
+-    std::thread               worker_thread { &SaveToFile::worker_function, this };
+     std::shared_ptr<Registry> registry_ptr  { nullptr };
+     bool                      must_die      { false };
++    std::mutex                mutex;
++    std::condition_variable   wake;
++    // Started by set_registry() with a registry, stopped without one.
++    std::thread               worker_thread;
+ 
++    // Called with mutex held.
+     void save_data() {
+       if (registry_ptr) {
+         std::fstream out_file_stream;
+@@ -29,54 +42,71 @@
+     }
+ 
+     void worker_function() {
+-      // it need for fast shutdown this thread when SaveToFile destructor is called
+-      const uint64_t divider = 100;
+-      uint64_t fraction = divider;
+-      for (;;) {
+-        std::chrono::milliseconds period_ms
+-          = std::chrono::duration_cast<std::chrono::milliseconds>(period);
+-        std::this_thread::sleep_for( period_ms / divider );
+-        if (must_die) {
+-          save_data();
+-          return;
+-        }
+-        if (--fraction == 0) {
+-          fraction = divider;
+-          save_data();
++      std::unique_lock<std::mutex> lock(mutex);
++      while (!must_die) {
++        if (wake.wait_for(lock, period, [this] { return must_die; })) {
++          break;
+         }
++        save_data();
++      }
++      save_data();
++    }
++
++    // Starts the thread if a registry is set; called with mutex held.
++    void start_locked() {
++      if (registry_ptr && !worker_thread.joinable()) {
++        must_die = false;
++        worker_thread = std::thread(&SaveToFile::worker_function, this);
++      }
++    }
++
++    // Stops the thread after a last save; called without mutex held.
++    void stop_worker() {
++      std::thread finished;
++      {
++        std::lock_guard<std::mutex> lock(mutex);
++        must_die = true;
++        finished = std::move(worker_thread);
++      }
++      wake.notify_all();
++      if (finished.joinable()) {
++        finished.join();
+       }
+     }
+-    
++
+   public:
+     SaveToFile() = default;
+ 
+     void stop() {
+-      must_die = true;
+-      worker_thread.join();
++      stop_worker();
+     }
+ 
+     void restart() {
+-      must_die = false;
+-      worker_thread = std::thread(&SaveToFile::worker_function, this);
++      std::lock_guard<std::mutex> lock(mutex);
++      start_locked();
+     }
+ 
+     ~SaveToFile() {
+-      must_die = true;
+-      worker_thread.join();
++      stop_worker();
+     }
+ 
+     SaveToFile(std::shared_ptr<Registry>& registry_, const std::chrono::seconds& period_, const std::string& filename_) {
+-      set_registry(registry_);
+       set_delay(period_);
+       set_out_file(filename_);
++      set_registry(registry_);
+     }
+ 
+     void set_delay (const std::chrono::seconds& new_period) {
+-      period = new_period;
++      {
++        std::lock_guard<std::mutex> lock(mutex);
++        period = new_period;
++      }
++      wake.notify_all();
+     }
+ 
+ 
+     bool set_out_file (const std::string& filename_) {
++      std::lock_guard<std::mutex> lock(mutex);
+       filename = filename_;
+       std::fstream out_file_stream;
+       out_file_stream.open(filename, std::fstream::out | std::fstream::binary);
+@@ -86,7 +116,12 @@
+     }
+ 
+     void set_registry (std::shared_ptr<Registry>& new_registry_ptr) {
++      if (!new_registry_ptr) {
++        stop_worker();
++      }
++      std::lock_guard<std::mutex> lock(mutex);
+       registry_ptr = new_registry_ptr;
++      start_locked();
+     }
+ 
+   };

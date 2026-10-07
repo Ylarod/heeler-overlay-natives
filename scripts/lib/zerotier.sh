@@ -117,8 +117,9 @@ License 2.0, to which its Business Source License converted on its Change
 Date. ZeroTierOne's core (node/, osdep/) is used under the Mozilla Public
 License 2.0 (ZeroTierOne-MPL-2.0.txt); the Source Code Form of those files,
 with Heeler's modifications, is that release tag (the pinned ZeroTierOne
-commit plus these patches). Heeler also adds src/heeler_zerotier.cpp and
-src/heeler_zerotier.h (native/zerotier in that repository) to libzt.
+commit plus these patches). prometheus-cpp-lite (MIT) is modified by patch
+0003. Heeler also adds src/heeler_zerotier.cpp and src/heeler_zerotier.h
+(native/zerotier in that repository) to libzt.
 
 EOF
         local entry patch_file
@@ -166,6 +167,7 @@ EOF
 - lwIP contrib: commit ${LWIP_CONTRIB_COMMIT} (${LWIP_CONTRIB_REPO})
 - libzt configuration: BUILD_IOS_FRAMEWORK, zt-static, central API disabled, local symbols stripped
 - ZeroTier licence: libzt BUSL-1.1, converted to Apache-2.0 on its Change Date (2026-01-01); ZeroTierOne MPL-2.0 (node/, osdep/; nothing from nonfree/ is compiled)
+- libzt metrics: off (zts_init_enable_metrics is never called; patch 0003 starts the saver thread only when enabled)
 - CMake: $(cmake --version | sed -n '1p')
 EOF
 }
