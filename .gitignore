@@ -1,0 +1,13 @@
+# Build output: stages, assembled Artifacts, release packages, cargo target.
+/build/
+# SwiftPM and Xcode state.
+.build/
+.swiftpm/
+/Tests/LinkProbe/Package.resolved
+xcuserdata/
+DerivedData/
+# Local tooling.
+__pycache__/
+.DS_Store
+# Download, Go module, and Go build caches when HEELER_NATIVES_CACHE_DIR points here (CI).
+/.natives-cache/
