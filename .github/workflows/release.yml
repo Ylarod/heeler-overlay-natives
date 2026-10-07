@@ -1,0 +1,108 @@
+# Publishes a release: a clean build, verification, deterministic zips, and a
+# release manifest (Package.swift with url + checksum) committed on top of
+# the released commit and tagged, so `.package(url:exact:)` resolves the
+# release's assets.
+#
+# - workflow_dispatch(version): builds main (or the chosen ref), creates the
+#   release commit and tag v<version>, pushes the tag, and creates the GitHub
+#   release with the assets.
+# - push of a tag v*: for tags cut locally with scripts/release.sh. Rebuilds
+#   on CI and uploads the assets only if the generated Package.swift (hence
+#   every zip checksum) equals the one committed in the tag; otherwise it
+#   fails, and the locally built assets are uploaded by hand
+#   (`gh release create <tag> build/dist/<tag>/*`).
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, without the leading v (e.g. 1.0.0)
+        required: true
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 180
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      HEELER_NATIVES_CACHE_DIR: ${{ github.workspace }}/.natives-cache
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      # Downloads and the Go module cache only: release builds are clean
+      # (FORCE=1), with no reused stage, Go build cache, or cargo target.
+      - name: Restore download caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .natives-cache/downloads
+            .natives-cache/go-mod
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: natives-release-${{ runner.os }}-${{ hashFiles('sources.lock', 'native/tailscale/go.sum', 'native/easytier/Cargo.lock') }}
+
+      - name: Audit submodules against the pinned commit archives
+        run: scripts/audit-upstream.sh
+
+      - name: Cut the release (dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          scripts/release.sh "${VERSION}"
+          tag="v${VERSION#v}"
+          git push origin "refs/tags/${tag}"
+          echo "TAG=${tag}" >> "${GITHUB_ENV}"
+
+      - name: Rebuild and compare with the tag's manifest (tag push)
+        if: github.event_name == 'push'
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          FORCE=1 scripts/build.sh
+          scripts/package.sh "${tag}"
+          if ! cmp -s Package.swift "build/dist/${tag}/Package.swift"; then
+            diff Package.swift "build/dist/${tag}/Package.swift" || true
+            echo "::error::CI's build does not reproduce the checksums committed in ${tag}; upload the locally built assets with gh release create."
+            exit 1
+          fi
+          echo "TAG=${tag}" >> "${GITHUB_ENV}"
+
+      - name: Publish the GitHub release
+        run: |
+          dist="build/dist/${TAG}"
+          {
+            echo "Overlay native XCFrameworks for Heeler (CTailscale, CZeroTier, CEasyTier)."
+            echo
+            echo '```'
+            cat "${dist}/checksums.txt"
+            echo '```'
+            echo
+            echo "Licence notices and build provenance: Notices.zip. Sources: this tag with its submodules."
+          } > "${RUNNER_TEMP}/notes.md"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" "${dist}"/* --clobber
+          else
+            gh release create "${TAG}" --verify-tag --title "heeler-overlay-natives ${TAG}" \
+              --notes-file "${RUNNER_TEMP}/notes.md" "${dist}"/*
+          fi

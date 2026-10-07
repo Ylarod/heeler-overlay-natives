@@ -1,0 +1,101 @@
+# Builds the three XCFrameworks from the pinned submodules, verifies them,
+# spot-checks reproducibility with a clean rebuild, and links them into the
+# Simulator probe. Libraries whose input fingerprint is unchanged are restored
+# from the stage cache and skipped (scripts/build.sh), so most PRs rebuild
+# only what they touch.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      reproduce_all:
+        description: Clean-rebuild all three libraries (not only CZeroTier and CTailscale) and compare
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 150
+    env:
+      # The toolchain the published artifacts are built with (PROVENANCE.md
+      # records it); a different Xcode or SDK gives different bytes.
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      HEELER_NATIVES_CACHE_DIR: ${{ github.workspace }}/.natives-cache
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          cmake --version | head -1
+          rustup --version
+          python3 --version
+
+      - name: Restore download, Go, Cargo, and stage caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .natives-cache
+            ~/.cargo/registry
+            ~/.cargo/git
+            build/cargo-target
+            build/stage
+          key: natives-${{ runner.os }}-xcode26.3-${{ hashFiles('sources.lock', 'scripts/**', 'native/**', 'patches/**', 'include/**', 'licenses/**') }}
+          restore-keys: |
+            natives-${{ runner.os }}-xcode26.3-
+
+      - name: Audit submodules against the pinned commit archives
+        run: scripts/audit-upstream.sh
+
+      - name: Build (skips libraries whose inputs are unchanged)
+        run: scripts/build.sh
+
+      - name: Verify
+        run: scripts/verify.sh build/Artifacts
+
+      - name: Reproducibility spot check (clean rebuild and byte comparison)
+        env:
+          REPRODUCE_ALL: ${{ inputs.reproduce_all && '1' || '0' }}
+        run: |
+          libraries=zerotier,tailscale
+          frameworks="CZeroTier CTailscale"
+          if [[ "${REPRODUCE_ALL}" == "1" ]]; then
+            libraries=zerotier,tailscale,easytier
+            frameworks="CZeroTier CTailscale CEasyTier"
+          fi
+          FORCE=1 HEELER_NATIVES_BUILD_DIR="${RUNNER_TEMP}/repro" scripts/build.sh --only "${libraries}"
+          for library in ${libraries//,/ }; do
+            case "${library}" in
+              tailscale) framework=CTailscale ;;
+              zerotier) framework=CZeroTier ;;
+              easytier) framework=CEasyTier ;;
+            esac
+            scripts/compare-artifacts.sh build/Artifacts "${RUNNER_TEMP}/repro/stage/${library}" "${framework}"
+          done
+
+      - name: Link probe on the iOS Simulator
+        run: scripts/link-probe.sh
+
+      - name: Upload provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance
+          path: |
+            build/Artifacts/PROVENANCE.md
+            build/Artifacts/SHA256SUMS
+          if-no-files-found: ignore
