@@ -33,7 +33,7 @@ Ported from ZeroTierOne 1.12.0 to 1.16.2, whose relay, WHOIS, GATHER, and
 moon handling is unchanged (getUpstreamPeer only gained an unused network
 argument); the patch keeps the same behaviour.
 
-Applies to libzt commit 00dfa3ee39f13b2cb162dc127ab12dfccf342234 with its
+Applies to libzt commit 7e5d0f99a2de81c45faa28e44289bcd19d933bf2 with its
 ext/ZeroTierOne submodule at fc5c3ec22090b5b2a0f274e863651fe9ca489bf4 (1.16.2).
 
 --- a/ext/ZeroTierOne/node/Constants.hpp

@@ -36,13 +36,13 @@ LIBTAILSCALE_GO_SUM_SHA256="36aaa5ce20118a55be656de3747c51a959c60bfa61ee031094fe
 # ZeroTier: libzt (ZeroTierOne + lwIP) as CZeroTier
 # ---------------------------------------------------------------------------
 
-# libzt: submodule upstream/libzt, from Ylarod/libzt's update-zerotierone-1.16.2
-# branch (zerotier/libzt main a707ea6 plus ten commits: ZeroTierOne 1.16.2,
-# blocking zts_node_stop, ZTS_EVENT_NODE_DOWN ending the callback thread,
-# opt-in metrics, offline tests). Its own submodules are pinned by libzt's
-# gitlinks at the commits below (URLs from libzt's .gitmodules).
+# libzt: submodule upstream/libzt, Ylarod/libzt tag 1.16.2 (zerotier/libzt
+# main a707ea6 plus ZeroTierOne 1.16.2, blocking zts_node_stop,
+# ZTS_EVENT_NODE_DOWN ending the callback thread, opt-in metrics, offline
+# tests). Its own submodules are pinned by libzt's gitlinks at the commits
+# below (URLs from libzt's .gitmodules).
 LIBZT_REPO="https://github.com/Ylarod/libzt"
-LIBZT_COMMIT="00dfa3ee39f13b2cb162dc127ab12dfccf342234"
+LIBZT_COMMIT="7e5d0f99a2de81c45faa28e44289bcd19d933bf2"
 # ZeroTierOne 1.16.2 (tag 1.16.2).
 ZEROTIERONE_REPO="https://github.com/zerotier/ZeroTierOne"
 ZEROTIERONE_COMMIT="fc5c3ec22090b5b2a0f274e863651fe9ca489bf4"
@@ -53,7 +53,7 @@ LWIP_CONTRIB_COMMIT="4fd612c9c72dfcd1db6618bd59c1a17d9f5b55f8"
 
 # Patches to libzt and its ext/ZeroTierOne submodule, applied in order at the
 # libzt root to the build copy: "file:sha256" pairs from patches/libzt.
-ZEROTIER_PATCHES="0001-independent-root-sets.patch:c4cbe65c322841a6bac9ca3ced77bf438dd47deac6f7c291231867101bb94b6b 0002-managed-gateway-routes.patch:34c3bce3badf63caba0b74b081d7fe44ddad389d6b40347fa71ccfd121b8b270 0003-metrics-saver-on-demand.patch:abb698416801341e03971a69c676ecc0e7d425b2e9c7c76a12b511729750984b"
+ZEROTIER_PATCHES="0001-independent-root-sets.patch:b082d29c410f2e69ecdcf829ad57f6575173bb03add85b08253539790bacba43 0002-managed-gateway-routes.patch:ec02c07070d6a252e8042a5e1dfcdcfe2bcc4409e40a1bee758081982f03efdd 0003-metrics-saver-on-demand.patch:abb698416801341e03971a69c676ecc0e7d425b2e9c7c76a12b511729750984b"
 
 # ---------------------------------------------------------------------------
 # EasyTier: EasyTier through the heeler-easytier crate as CEasyTier
@@ -107,7 +107,7 @@ GPL3_TEXT_SHA256="3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb369
 # them, checks the hashes, and checks that `git archive` of each submodule
 # commit (what the build compiles) holds exactly the same files.
 LIBTAILSCALE_ARCHIVE_SHA256="471b8be37ef774a5c3d2f35e0f2b1c5e9aba9743f457fb5fa71e25bda92f3953"
-LIBZT_ARCHIVE_SHA256="966153c08e8b8b8fe0d212d5a6534466be856c50a7195764294646dd148fa980"
+LIBZT_ARCHIVE_SHA256="ba9ade19877d6f35b061600d8e2d0df6d6273f11099f07b05c9d9793fb447e0c"
 ZEROTIERONE_ARCHIVE_SHA256="5f48e6a9492cc2a31f28f9f15e7fad5e1b4a82e95fe451464ff2b32d6bed9fa4"
 LWIP_ARCHIVE_SHA256="49e5a5a1c5b4eedcc749abd60e839d4552618fbbe72a6920447e7dcacb3ea4bf"
 LWIP_CONTRIB_ARCHIVE_SHA256="8d0f2c9c54dc2f51e213afc52ebc3be1615a2269d4aa0f93198de86ac67178f3"

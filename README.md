@@ -22,7 +22,7 @@ the native code, its patches, and the build.
 | libtailscale | commit `59d4bb82744915815178e0f0776d60026a397ee7` (no tags upstream) | submodule `upstream/libtailscale` |
 | tailscale.com | `v1.102.5` (libtailscale's own go.mod says v1.94.1) | `native/tailscale/go.mod`, `go.sum` |
 | Go | `go1.27.1` darwin-arm64, SHA-256 verified download | `sources.lock` |
-| libzt | commit `00dfa3ee39f13b2cb162dc127ab12dfccf342234` (Ylarod/libzt `update-zerotierone-1.16.2`: zerotier/libzt main `a707ea6` plus ZeroTierOne 1.16.2, blocking `zts_node_stop`, opt-in metrics) | submodule `upstream/libzt` |
+| libzt | tag `1.16.2`, commit `7e5d0f99a2de81c45faa28e44289bcd19d933bf2` (Ylarod/libzt: zerotier/libzt main `a707ea6` plus ZeroTierOne 1.16.2, blocking `zts_node_stop`, opt-in metrics) | submodule `upstream/libzt` |
 | ZeroTierOne | 1.16.2, commit `fc5c3ec22090b5b2a0f274e863651fe9ca489bf4` | libzt's submodule `ext/ZeroTierOne` |
 | lwIP | commit `32708c0a8b140efb545cc35101ee5fdeca6d6489` (joseph-henry/lwip, STABLE-2_1_x) | libzt's submodule `ext/lwip` |
 | lwIP contrib | commit `4fd612c9c72dfcd1db6618bd59c1a17d9f5b55f8` (joseph-henry/lwip-contrib) | libzt's submodule `ext/lwip-contrib` |

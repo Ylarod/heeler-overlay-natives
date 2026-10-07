@@ -35,7 +35,7 @@ traffic still matches a netif before the hook runs. IPv6 gateway routes are not 
 as before. Each changed file carries a "Modified by Heeler contributors"
 notice.
 
-Applies to libzt commit 00dfa3ee39f13b2cb162dc127ab12dfccf342234 (src/ only).
+Applies to libzt commit 7e5d0f99a2de81c45faa28e44289bcd19d933bf2 (src/ only).
 
 --- a/src/NodeService.cpp
 +++ b/src/NodeService.cpp
