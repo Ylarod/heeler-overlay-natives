@@ -108,6 +108,12 @@ check_submodules() {
     check_gitlink "${ROOT_DIR}" upstream/libtailscale "${LIBTAILSCALE_COMMIT}"
     check_gitlink "${ROOT_DIR}" upstream/libzt "${LIBZT_COMMIT}"
     check_gitlink "${ROOT_DIR}" upstream/EasyTier "${EASYTIER_COMMIT}"
+    local path repository_url
+    for path in libtailscale:"${LIBTAILSCALE_REPO}" libzt:"${LIBZT_REPO}" EasyTier:"${EASYTIER_REPO}"; do
+        repository_url="$(git -C "${ROOT_DIR}" config --file .gitmodules "submodule.upstream/${path%%:*}.url")"
+        [[ "${repository_url%.git}" == "${path#*:}" ]] \
+            || die ".gitmodules points upstream/${path%%:*} at ${repository_url}, sources.lock at ${path#*:}"
+    done
     local libzt="${ROOT_DIR}/upstream/libzt"
     check_gitlink "${libzt}" ext/ZeroTierOne "${ZEROTIERONE_COMMIT}" "${LIBZT_COMMIT}"
     check_gitlink "${libzt}" ext/lwip "${LWIP_COMMIT}" "${LIBZT_COMMIT}"
