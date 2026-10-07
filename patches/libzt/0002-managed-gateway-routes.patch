@@ -35,7 +35,7 @@ traffic still matches a netif before the hook runs. IPv6 gateway routes are not 
 as before. Each changed file carries a "Modified by Heeler contributors"
 notice.
 
-Applies to libzt commit a707ea6ae0910efdc1125d04758c411e2e9ea4f9 (src/ only).
+Applies to libzt commit 00dfa3ee39f13b2cb162dc127ab12dfccf342234 (src/ only).
 
 --- a/src/NodeService.cpp
 +++ b/src/NodeService.cpp
@@ -51,7 +51,7 @@ Applies to libzt commit a707ea6ae0910efdc1125d04758c411e2e9ea4f9 (src/ only).
  /**
   * @file
   *
-@@ -625,6 +630,28 @@
+@@ -698,6 +703,28 @@
          }
      }
      n.managedIps.swap(newManagedIps);
@@ -249,11 +249,10 @@ Applies to libzt commit a707ea6ae0910efdc1125d04758c411e2e9ea4f9 (src/ only).
  /**
   * @file
   *
-@@ -82,6 +86,31 @@
-                     // layer
+@@ -83,6 +87,31 @@
  
      void setUserEventSystem(Events* events);
-+
+ 
 +    /**
 +     * An IPv4 managed route through a gateway on this network (Heeler):
 +     * addresses in network byte order.
@@ -278,9 +277,10 @@ Applies to libzt commit a707ea6ae0910efdc1125d04758c411e2e9ea4f9 (src/ only).
 +
 +    Mutex _gatewayRoutes4_m;
 +    std::vector<GatewayRoute4> _gatewayRoutes4;
- 
++
      /**
       * Return whether this tap has been assigned an IPv4 address.
+      */
 --- a/src/lwipopts.h
 +++ b/src/lwipopts.h
 @@ -30,6 +30,12 @@
@@ -296,11 +296,10 @@ Applies to libzt commit a707ea6ae0910efdc1125d04758c411e2e9ea4f9 (src/ only).
  /**
   * @file
   *
-@@ -3450,5 +3456,22 @@
- /**
+@@ -3451,4 +3457,21 @@
   * @}
   */
-+
+ 
 +/*
 + * Heeler: ZeroTier managed routes through a gateway, implemented in
 + * VirtualTap.cpp (zts_lwip_hook_*).
@@ -317,5 +316,5 @@ Applies to libzt commit a707ea6ae0910efdc1125d04758c411e2e9ea4f9 (src/ only).
 +#endif
 +#define LWIP_HOOK_IP4_ROUTE_SRC(src, dest)   zts_lwip_hook_ip4_route_src(src, dest)
 +#define LWIP_HOOK_ETHARP_GET_GW(netif, dest) zts_lwip_hook_etharp_get_gw(netif, dest)
- 
++
  #endif /* LWIP_HDR_OPT_H */

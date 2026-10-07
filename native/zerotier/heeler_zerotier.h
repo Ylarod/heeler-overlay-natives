@@ -4,10 +4,9 @@
  *
  * Heeler's addition to libzt (NativeSupport/heeler_zerotier.cpp, compiled
  * into CZeroTier). libzt has no way to list a node's peers: the
- * zts_core_query_path* functions are stubs, and the peer events copy
- * ZeroTierOne's ZT_Peer into the differently laid out zts_peer_info_t, so
- * only their first fields are meaningful. heeler_zt_peers reads the node's
- * peer list directly instead.
+ * zts_core_query_path* functions are stubs, and peer events describe one
+ * peer at the moment it changed. heeler_zt_peers reads the node's peer list
+ * directly instead.
  *
  * libzt also takes custom roots only as the whole process's planet, at its
  * first start. heeler_zt_planet_inspect and heeler_zt_add_moon instead turn

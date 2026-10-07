@@ -157,16 +157,17 @@ done
 for notice in \
     libtailscale-BSD-3-Clause.txt Tailscale-BSD-3-Clause.txt Go-BSD-3-Clause.txt \
     Tailscale-Go-modules.txt libzt-BUSL-1.1-Apache-2.0.txt \
-    ZeroTierOne-BUSL-1.1-Apache-2.0.txt ZeroTierOne-LZ4-BSD-2-Clause.txt \
+    ZeroTierOne-MPL-2.0.txt ZeroTierOne-LZ4-BSD-2-Clause.txt \
     lwIP-BSD-3-Clause.txt lwIP-contrib-BSD-3-Clause.txt miniupnpc-BSD-3-Clause.txt \
-    libnatpmp-BSD-3-Clause.txt nlohmann-json-MIT.txt ZeroTier-Heeler-modifications.txt \
+    libnatpmp-BSD-3-Clause.txt prometheus-cpp-lite-MIT.txt concurrentqueue-BSD-2-Clause.txt \
+    ZeroTier-Heeler-modifications.txt \
     EasyTier-LGPL-3.0.txt EasyTier-Rust-crates.txt heeler-easytier-LGPL-3.0-or-later.txt; do
     [[ -s "Notices/${notice}" ]] || die "missing notice Notices/${notice}"
 done
 notice_count="$(find Notices -type f | wc -l | tr -d ' ')"
-[[ "${notice_count}" == "16" ]] || die "Notices holds ${notice_count} files, expected 16"
+[[ "${notice_count}" == "17" ]] || die "Notices holds ${notice_count} files, expected 17"
 grep -q "Change License:       Apache License version 2.0" Notices/libzt-BUSL-1.1-Apache-2.0.txt
-grep -q "Change License:       Apache License version 2.0" Notices/ZeroTierOne-BUSL-1.1-Apache-2.0.txt
+grep -q "Mozilla Public License Version 2.0" Notices/ZeroTierOne-MPL-2.0.txt
 
 # Committed build inputs must match sources.lock.
 verify_licence_texts
@@ -216,7 +217,7 @@ grep -q "^smoltcp | " Notices/EasyTier-Rust-crates.txt
 cmp -s "${ROOT_DIR}/native/easytier/NOTICE.txt" Notices/heeler-easytier-LGPL-3.0-or-later.txt \
     || die "heeler-easytier-LGPL-3.0-or-later.txt is not native/easytier/NOTICE.txt"
 has "Deployment target: iOS ${DEPLOYMENT_TARGET}"
-has "ZeroTier licence: BUSL-1.1, converted to Apache-2.0"
+has "ZeroTier licence: libzt BUSL-1.1, converted to Apache-2.0"
 
 signature_line="$(grep '^- Signature: ' "${provenance}")" || die "PROVENANCE.md does not record the signature status"
 for framework in "${FRAMEWORKS[@]}"; do

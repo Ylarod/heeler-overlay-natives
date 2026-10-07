@@ -29,14 +29,18 @@ With only ZeroTier's planet there is one root set, so lookups, relaying,
 and GATHER go to the single best upstream as before. Each changed file
 carries a "Modified by Heeler contributors" notice.
 
-Applies to libzt commit a707ea6ae0910efdc1125d04758c411e2e9ea4f9 with its
-ext/ZeroTierOne submodule at c53c6bd9c320ea839c525972d8afba448a58606e.
+Ported from ZeroTierOne 1.12.0 to 1.16.2, whose relay, WHOIS, GATHER, and
+moon handling is unchanged (getUpstreamPeer only gained an unused network
+argument); the patch keeps the same behaviour.
+
+Applies to libzt commit 00dfa3ee39f13b2cb162dc127ab12dfccf342234 with its
+ext/ZeroTierOne submodule at fc5c3ec22090b5b2a0f274e863651fe9ca489bf4 (1.16.2).
 
 --- a/ext/ZeroTierOne/node/Constants.hpp
 +++ b/ext/ZeroTierOne/node/Constants.hpp
-@@ -11,6 +11,10 @@
+@@ -6,6 +6,10 @@
+  * https://www.zerotier.com/
   */
- /****/
  
 +/*
 + * Modified by Heeler contributors (2026): ZT_HEELER_LEARNED_VIA_TTL.
@@ -45,9 +49,7 @@ ext/ZeroTierOne submodule at c53c6bd9c320ea839c525972d8afba448a58606e.
  #ifndef ZT_CONSTANTS_HPP
  #define ZT_CONSTANTS_HPP
  
-@@ -441,6 +445,11 @@
- #define ZT_PEER_ACTIVITY_TIMEOUT 500000
- #else
+@@ -510,6 +514,11 @@
  #define ZT_PEER_ACTIVITY_TIMEOUT 30000
  #endif
  
@@ -57,112 +59,115 @@ ext/ZeroTierOne submodule at c53c6bd9c320ea839c525972d8afba448a58606e.
 +#define ZT_HEELER_LEARNED_VIA_TTL 120000
 +
  /**
+  * General rate limit timeout for multiple packet types (HELLO, etc.)
+  */
 --- a/ext/ZeroTierOne/node/IncomingPacket.cpp
 +++ b/ext/ZeroTierOne/node/IncomingPacket.cpp
-@@ -11,6 +11,11 @@
+@@ -6,6 +6,11 @@
+  * https://www.zerotier.com/
   */
- /****/
  
 +/*
 + * Modified by Heeler contributors (2026): records which upstream relayed each peer's packets
 + * (Topology::noteRelayedVia).
 + */
 +
- #include <stdio.h>
- #include <string.h>
- #include <stdlib.h>
-@@ -81,6 +86,9 @@
+ #include "IncomingPacket.hpp"
+ 
+ #include "../include/ZeroTierOne.h"
+@@ -77,6 +82,9 @@
  
  			_authenticated = true;
  			const Packet::Verb v = verb();
 +			if (hops() > 0) {
-+				RR->topology->noteRelayedVia(sourceAddress,_path,RR->node->now()); // Heeler
++				RR->topology->noteRelayedVia(sourceAddress, _path, RR->node->now());	// Heeler
 +			}
  
  			bool r = true;
- 			switch(v) {
-@@ -461,6 +469,10 @@
- 	}
+ 			switch (v) {
+@@ -465,6 +473,10 @@
  
  	// VALID -- if we made it here, packet passed identity and authenticity checks!
-+
-+	if (hops() > 0) {
-+		RR->topology->noteRelayedVia(id.address(),_path,now); // Heeler
-+	}
  
++	if (hops() > 0) {
++		RR->topology->noteRelayedVia(id.address(), _path, now);	// Heeler
++	}
++
  	// Get external surface address if present (was not in old versions)
  	InetAddress externalSurfaceAddress;
+ 	if (ptr < size()) {
 --- a/ext/ZeroTierOne/node/Multicaster.cpp
 +++ b/ext/ZeroTierOne/node/Multicaster.cpp
-@@ -11,6 +11,11 @@
+@@ -6,6 +6,11 @@
+  * https://www.zerotier.com/
   */
- /****/
  
 +/*
 + * Modified by Heeler contributors (2026): multicast GATHER asks the controller's relay, or one upstream per
 + * root set (Topology::getRelaysFor).
 + */
 +
- #include <algorithm>
+ #include "Multicaster.hpp"
  
- #include "Constants.hpp"
-@@ -284,9 +289,11 @@
+ #include "CertificateOfMembership.hpp"
+@@ -265,9 +270,11 @@
  				Address explicitGatherPeers[16];
  				unsigned int numExplicitGatherPeers = 0;
  
--				SharedPtr<Peer> bestRoot(RR->topology->getUpstreamPeer());
+-				SharedPtr<Peer> bestRoot(RR->topology->getUpstreamPeer(network->id()));
 -				if (bestRoot) {
 -					explicitGatherPeers[numExplicitGatherPeers++] = bestRoot->address();
 +				// Heeler: the controller's relay, or one upstream per root set.
-+				std::vector< SharedPtr<Peer> > roots;
-+				RR->topology->getRelaysFor(network->controller(),roots);
-+				for(std::vector< SharedPtr<Peer> >::const_iterator r(roots.begin());(r!=roots.end())&&(numExplicitGatherPeers < 4);++r) {
++				std::vector<SharedPtr<Peer> > roots;
++				RR->topology->getRelaysFor(network->controller(), roots);
++				for (std::vector<SharedPtr<Peer> >::const_iterator r(roots.begin()); (r != roots.end()) && (numExplicitGatherPeers < 4); ++r) {
 +					explicitGatherPeers[numExplicitGatherPeers++] = (*r)->address();
  				}
  
  				explicitGatherPeers[numExplicitGatherPeers++] = network->controller();
 --- a/ext/ZeroTierOne/node/Node.cpp
 +++ b/ext/ZeroTierOne/node/Node.cpp
-@@ -11,6 +11,10 @@
+@@ -6,6 +6,10 @@
+  * https://www.zerotier.com/
   */
- /****/
  
 +/*
 + * Modified by Heeler contributors (2026): Node::addLocalMoon.
 + */
 +
- #include <stdio.h>
- #include <stdlib.h>
- #include <stdarg.h>
-@@ -518,6 +522,23 @@
- {
- 	RR->topology->addMoon(tptr,moonWorldId,Address(moonSeed));
+ #include "Node.hpp"
+ 
+ #include "../version.h"
+@@ -541,6 +545,24 @@
  	return ZT_RESULT_OK;
-+}
-+
-+ZT_ResultCode Node::addLocalMoon(void *tptr,const void *moon,unsigned int len)
+ }
+ 
++ZT_ResultCode Node::addLocalMoon(void* tptr, const void* moon, unsigned int len)
 +{
-+	if ((!moon)||(len == 0)||(len > ZT_WORLD_MAX_SERIALIZED_LENGTH)) {
++	if ((! moon) || (len == 0) || (len > ZT_WORLD_MAX_SERIALIZED_LENGTH)) {
 +		return ZT_RESULT_ERROR_BAD_PARAMETER;
 +	}
 +	try {
 +		World w;
-+		const unsigned int used = w.deserialize(Buffer<ZT_WORLD_MAX_SERIALIZED_LENGTH>(moon,len),0);
-+		if ((used != len)||(w.type() != World::TYPE_MOON)||(w.id() == 0)||(w.roots().empty())) {
++		const unsigned int used = w.deserialize(Buffer<ZT_WORLD_MAX_SERIALIZED_LENGTH>(moon, len), 0);
++		if ((used != len) || (w.type() != World::TYPE_MOON) || (w.id() == 0) || (w.roots().empty())) {
 +			return ZT_RESULT_ERROR_BAD_PARAMETER;
 +		}
-+		return RR->topology->addWorld(tptr,w,true) ? ZT_RESULT_OK : ZT_RESULT_ERROR_BAD_PARAMETER;
-+	} catch ( ... ) {
++		return RR->topology->addWorld(tptr, w, true) ? ZT_RESULT_OK : ZT_RESULT_ERROR_BAD_PARAMETER;
++	}
++	catch (...) {
 +		return ZT_RESULT_ERROR_BAD_PARAMETER;
 +	}
- }
- 
- ZT_ResultCode Node::deorbit(void *tptr,uint64_t moonWorldId)
++}
++
+ ZT_ResultCode Node::deorbit(void* tptr, uint64_t moonWorldId)
+ {
+ 	RR->topology->removeMoon(tptr, moonWorldId);
 --- a/ext/ZeroTierOne/node/Node.hpp
 +++ b/ext/ZeroTierOne/node/Node.hpp
-@@ -11,6 +11,10 @@
+@@ -6,6 +6,10 @@
+  * https://www.zerotier.com/
   */
- /****/
  
 +/*
 + * Modified by Heeler contributors (2026): Node::addLocalMoon.
@@ -171,10 +176,10 @@ ext/ZeroTierOne submodule at c53c6bd9c320ea839c525972d8afba448a58606e.
  #ifndef ZT_NODE_HPP
  #define ZT_NODE_HPP
  
-@@ -90,6 +94,18 @@
- 	ZT_ResultCode multicastUnsubscribe(uint64_t nwid,uint64_t multicastGroup,unsigned long multicastAdi);
- 	ZT_ResultCode orbit(void *tptr,uint64_t moonWorldId,uint64_t moonSeed);
- 	ZT_ResultCode deorbit(void *tptr,uint64_t moonWorldId);
+@@ -77,6 +81,18 @@
+ 	ZT_ResultCode multicastUnsubscribe(uint64_t nwid, uint64_t multicastGroup, unsigned long multicastAdi);
+ 	ZT_ResultCode orbit(void* tptr, uint64_t moonWorldId, uint64_t moonSeed);
+ 	ZT_ResultCode deorbit(void* tptr, uint64_t moonWorldId);
 +
 +	/**
 +	 * Add a moon built locally rather than fetched from its roots (Heeler)
@@ -186,116 +191,117 @@ ext/ZeroTierOne submodule at c53c6bd9c320ea839c525972d8afba448a58606e.
 +	 * @param len Length of moon in bytes
 +	 * @return ZT_RESULT_OK, or ZT_RESULT_ERROR_BAD_PARAMETER for an invalid moon or one already present
 +	 */
-+	ZT_ResultCode addLocalMoon(void *tptr,const void *moon,unsigned int len);
++	ZT_ResultCode addLocalMoon(void* tptr, const void* moon, unsigned int len);
  	uint64_t address() const;
- 	void status(ZT_NodeStatus *status) const;
- 	ZT_PeerList *peers() const;
+ 	void status(ZT_NodeStatus* status) const;
+ 	ZT_PeerList* peers() const;
 --- a/ext/ZeroTierOne/node/Switch.cpp
 +++ b/ext/ZeroTierOne/node/Switch.cpp
-@@ -11,6 +11,11 @@
+@@ -6,6 +6,11 @@
+  * https://www.zerotier.com/
   */
- /****/
  
 +/*
 + * Modified by Heeler contributors (2026): WHOIS asks, and relaying goes through, one upstream per root
 + * set unless a peer's relay is known (Topology::getRelaysFor).
 + */
 +
- #include <stdio.h>
- #include <stdlib.h>
+ #include "Switch.hpp"
  
-@@ -962,10 +967,13 @@
+ #include "../include/ZeroTierOne.h"
+@@ -928,10 +933,13 @@
  		}
  	}
  
--	const SharedPtr<Peer> upstream(RR->topology->getUpstreamPeer());
+-	const SharedPtr<Peer> upstream(RR->topology->getUpstreamPeer(0));
 -	if (upstream) {
 +	// Heeler: root sets may be independent, each knowing only its own
 +	// peers, so the best upstream of every root set is asked.
-+	std::vector< SharedPtr<Peer> > upstreams;
++	std::vector<SharedPtr<Peer> > upstreams;
 +	RR->topology->getBestUpstreamPerRootSet(upstreams);
-+	for(std::vector< SharedPtr<Peer> >::const_iterator u(upstreams.begin());u!=upstreams.end();++u) {
++	for (std::vector<SharedPtr<Peer> >::const_iterator u(upstreams.begin()); u != upstreams.end(); ++u) {
  		int32_t flowId = ZT_QOS_NO_FLOW;
--		Packet outp(upstream->address(),RR->identity.address(),Packet::VERB_WHOIS);
-+		Packet outp((*u)->address(),RR->identity.address(),Packet::VERB_WHOIS);
+-		Packet outp(upstream->address(), RR->identity.address(), Packet::VERB_WHOIS);
++		Packet outp((*u)->address(), RR->identity.address(), Packet::VERB_WHOIS);
  		addr.appendTo(outp);
- 		send(tPtr,outp,true,flowId);
+ 		send(tPtr, outp, true, 0, flowId);
  	}
-@@ -1110,11 +1118,24 @@
- 			viaPath = peer->getAppropriatePath(now,false,flowId);
- 			if (!viaPath) {
- 				peer->tryMemorizedPath(tPtr,now); // periodically attempt memorized or statically defined paths, if any are known
--				const SharedPtr<Peer> relay(RR->topology->getUpstreamPeer());
--				if ( (!relay) || (!(viaPath = relay->getAppropriatePath(now,false,flowId))) ) {
--					if (!(viaPath = peer->getAppropriatePath(now,true,flowId))) {
+@@ -1081,12 +1089,25 @@
+ 			viaPath = peer->getAppropriatePath(now, false, flowId);
+ 			if (! viaPath) {
+ 				peer->tryMemorizedPath(tPtr, now);	 // periodically attempt memorized or statically defined paths, if any are known
+-				const SharedPtr<Peer> relay(RR->topology->getUpstreamPeer(nwid));
+-				if ((! relay) || (! (viaPath = relay->getAppropriatePath(now, false, flowId)))) {
+-					if (! (viaPath = peer->getAppropriatePath(now, true, flowId))) {
 -						return false;
 +				// Heeler: relay through the upstream that relayed this peer to
 +				// us, or else one upstream of each root set (just the best
 +				// upstream when there is only the planet).
-+				std::vector< SharedPtr<Peer> > relays;
-+				RR->topology->getRelaysFor(destination,relays);
++				std::vector<SharedPtr<Peer> > relays;
++				RR->topology->getRelaysFor(destination, relays);
 +				bool relayed = false;
-+				for(std::vector< SharedPtr<Peer> >::const_iterator r(relays.begin());r!=relays.end();++r) {
-+					const SharedPtr<Path> relayPath((*r)->getAppropriatePath(now,false,flowId));
++				for (std::vector<SharedPtr<Peer> >::const_iterator r(relays.begin()); r != relays.end(); ++r) {
++					const SharedPtr<Path> relayPath((*r)->getAppropriatePath(now, false, flowId));
 +					if (relayPath) {
-+						_sendViaSpecificPath(tPtr,peer,relayPath,relayPath->mtu(),now,packet,encrypt,flowId);
++						_sendViaSpecificPath(tPtr, peer, relayPath, relayPath->mtu(), now, packet, encrypt, flowId);
 +						relayed = true;
  					}
-+				}
+ 				}
 +				if (relayed) {
 +					return true;
 +				}
-+				if (!(viaPath = peer->getAppropriatePath(now,true,flowId))) {
++				if (! (viaPath = peer->getAppropriatePath(now, true, flowId))) {
 +					return false;
- 				}
++				}
  			}
  			if (viaPath) {
+ 				uint16_t userSpecifiedMtu = viaPath->mtu();
 --- a/ext/ZeroTierOne/node/Topology.cpp
 +++ b/ext/ZeroTierOne/node/Topology.cpp
-@@ -11,6 +11,11 @@
+@@ -6,6 +6,11 @@
+  * https://www.zerotier.com/
   */
- /****/
  
 +/*
 + * Modified by Heeler contributors (2026): relay and lookup per root set (getBestUpstreamPerRootSet,
 + * getRelaysFor, noteRelayedVia with expiry) for independent root sets.
 + */
 +
- #include "Constants.hpp"
  #include "Topology.hpp"
- #include "RuntimeEnvironment.hpp"
-@@ -153,6 +158,94 @@
- 	return *best;
+ 
+ #include "Buffer.hpp"
+@@ -178,6 +183,94 @@
+ 	return SharedPtr<Peer>();
  }
  
-+void Topology::_bestPerRootSet(int64_t now,const Address *sameSetAs,std::vector< SharedPtr<Peer> > &out)
++void Topology::_bestPerRootSet(int64_t now, const Address* sameSetAs, std::vector<SharedPtr<Peer> >& out)
 +{
 +	// assumes _peers_m and _upstreams_m are locked
-+	std::vector< const std::vector<World::Root> * > sets;
++	std::vector<const std::vector<World::Root>*> sets;
 +	sets.push_back(&(_planet.roots()));
-+	for(std::vector<World>::const_iterator m(_moons.begin());m!=_moons.end();++m) {
++	for (std::vector<World>::const_iterator m(_moons.begin()); m != _moons.end(); ++m) {
 +		sets.push_back(&(m->roots()));
 +	}
-+	for(std::vector< const std::vector<World::Root> * >::const_iterator s(sets.begin());s!=sets.end();++s) {
++	for (std::vector<const std::vector<World::Root>*>::const_iterator s(sets.begin()); s != sets.end(); ++s) {
 +		if (sameSetAs) {
 +			bool inSet = false;
-+			for(std::vector<World::Root>::const_iterator r((*s)->begin());r!=(*s)->end();++r) {
++			for (std::vector<World::Root>::const_iterator r((*s)->begin()); r != (*s)->end(); ++r) {
 +				if (r->identity.address() == *sameSetAs) {
 +					inSet = true;
 +					break;
 +				}
 +			}
-+			if (!inSet) {
++			if (! inSet) {
 +				continue;
 +			}
 +		}
 +		unsigned int bestq = ~((unsigned int)0);
-+		const SharedPtr<Peer> *best = (const SharedPtr<Peer> *)0;
-+		for(std::vector<World::Root>::const_iterator r((*s)->begin());r!=(*s)->end();++r) {
++		const SharedPtr<Peer>* best = (const SharedPtr<Peer>*)0;
++		for (std::vector<World::Root>::const_iterator r((*s)->begin()); r != (*s)->end(); ++r) {
 +			if (r->identity == RR->identity) {
 +				continue;
 +			}
-+			const SharedPtr<Peer> *p = _peers.get(r->identity.address());
++			const SharedPtr<Peer>* p = _peers.get(r->identity.address());
 +			if (p) {
 +				const unsigned int q = (*p)->relayQuality(now);
 +				if (q <= bestq) {
@@ -304,51 +310,51 @@ ext/ZeroTierOne submodule at c53c6bd9c320ea839c525972d8afba448a58606e.
 +				}
 +			}
 +		}
-+		if ((best)&&(std::find(out.begin(),out.end(),*best) == out.end())) {
++		if ((best) && (std::find(out.begin(), out.end(), *best) == out.end())) {
 +			out.push_back(*best);
 +		}
 +	}
 +}
 +
-+void Topology::getBestUpstreamPerRootSet(std::vector< SharedPtr<Peer> > &upstreams)
++void Topology::getBestUpstreamPerRootSet(std::vector<SharedPtr<Peer> >& upstreams)
 +{
 +	const int64_t now = RR->node->now();
 +	Mutex::Lock _l2(_peers_m);
 +	Mutex::Lock _l1(_upstreams_m);
-+	_bestPerRootSet(now,(const Address *)0,upstreams);
++	_bestPerRootSet(now, (const Address*)0, upstreams);
 +}
 +
-+void Topology::getRelaysFor(const Address &dest,std::vector< SharedPtr<Peer> > &relays)
++void Topology::getRelaysFor(const Address& dest, std::vector<SharedPtr<Peer> >& relays)
 +{
 +	const int64_t now = RR->node->now();
 +	Mutex::Lock _l2(_peers_m);
 +	Mutex::Lock _l1(_upstreams_m);
-+	const _LearnedVia *lv = _learnedVia.get(dest);
-+	if ((lv)&&(std::find(_upstreamAddresses.begin(),_upstreamAddresses.end(),lv->upstream) != _upstreamAddresses.end())) {
-+		const SharedPtr<Peer> *p = _peers.get(lv->upstream);
-+		if ((p)&&((*p)->relayQuality(now) != ~((unsigned int)0))) {
++	const _LearnedVia* lv = _learnedVia.get(dest);
++	if ((lv) && (std::find(_upstreamAddresses.begin(), _upstreamAddresses.end(), lv->upstream) != _upstreamAddresses.end())) {
++		const SharedPtr<Peer>* p = _peers.get(lv->upstream);
++		if ((p) && ((*p)->relayQuality(now) != ~((unsigned int)0))) {
 +			relays.push_back(*p);
 +			return;
 +		}
 +	}
-+	const bool destIsUpstream = (std::find(_upstreamAddresses.begin(),_upstreamAddresses.end(),dest) != _upstreamAddresses.end());
-+	_bestPerRootSet(now,destIsUpstream ? &dest : (const Address *)0,relays);
++	const bool destIsUpstream = (std::find(_upstreamAddresses.begin(), _upstreamAddresses.end(), dest) != _upstreamAddresses.end());
++	_bestPerRootSet(now, destIsUpstream ? &dest : (const Address*)0, relays);
 +}
 +
-+void Topology::noteRelayedVia(const Address &peer,const SharedPtr<Path> &path,int64_t now)
++void Topology::noteRelayedVia(const Address& peer, const SharedPtr<Path>& path, int64_t now)
 +{
-+	if (!path) {
++	if (! path) {
 +		return;
 +	}
 +	Mutex::Lock _l2(_peers_m);
 +	Mutex::Lock _l1(_upstreams_m);
-+	if (std::find(_upstreamAddresses.begin(),_upstreamAddresses.end(),peer) != _upstreamAddresses.end()) {
++	if (std::find(_upstreamAddresses.begin(), _upstreamAddresses.end(), peer) != _upstreamAddresses.end()) {
 +		return;
 +	}
-+	for(std::vector<Address>::const_iterator a(_upstreamAddresses.begin());a!=_upstreamAddresses.end();++a) {
-+		const SharedPtr<Peer> *p = _peers.get(*a);
-+		if ((p)&&((*p)->hasActivePathTo(now,path->address()))) {
-+			_LearnedVia &lv = _learnedVia[peer];
++	for (std::vector<Address>::const_iterator a(_upstreamAddresses.begin()); a != _upstreamAddresses.end(); ++a) {
++		const SharedPtr<Peer>* p = _peers.get(*a);
++		if ((p) && ((*p)->hasActivePathTo(now, path->address()))) {
++			_LearnedVia& lv = _learnedVia[peer];
 +			lv.upstream = *a;
 +			lv.ts = now;
 +			return;
@@ -356,31 +362,31 @@ ext/ZeroTierOne submodule at c53c6bd9c320ea839c525972d8afba448a58606e.
 +	}
 +}
 +
- bool Topology::isUpstream(const Identity &id) const
+ bool Topology::isUpstream(const Identity& id) const
  {
  	Mutex::Lock _l(_upstreams_m);
-@@ -367,6 +460,16 @@
- 			if ( (!(*p)->isAlive(now)) && (std::find(_upstreamAddresses.begin(),_upstreamAddresses.end(),*a) == _upstreamAddresses.end()) ) {
- 				_savePeer(tPtr,*p);
+@@ -435,6 +528,16 @@
  				_peers.erase(*a);
-+			}
-+		}
-+
-+		// Heeler: forget relays not seen lately, or for peers no longer known.
-+		Hashtable< Address,_LearnedVia >::Iterator lvi(_learnedVia);
-+		Address *lva = (Address *)0;
-+		_LearnedVia *lv = (_LearnedVia *)0;
-+		while (lvi.next(lva,lv)) {
-+			if (((now - lv->ts) > ZT_HEELER_LEARNED_VIA_TTL)||(!_peers.contains(*lva))) {
-+				_learnedVia.erase(*lva);
  			}
  		}
++
++		// Heeler: forget relays not seen lately, or for peers no longer known.
++		Hashtable<Address, _LearnedVia>::Iterator lvi(_learnedVia);
++		Address* lva = (Address*)0;
++		_LearnedVia* lv = (_LearnedVia*)0;
++		while (lvi.next(lva, lv)) {
++			if (((now - lv->ts) > ZT_HEELER_LEARNED_VIA_TTL) || (! _peers.contains(*lva))) {
++				_learnedVia.erase(*lva);
++			}
++		}
  	}
+ 
+ 	{
 --- a/ext/ZeroTierOne/node/Topology.hpp
 +++ b/ext/ZeroTierOne/node/Topology.hpp
-@@ -11,6 +11,11 @@
+@@ -6,6 +6,11 @@
+  * https://www.zerotier.com/
   */
- /****/
  
 +/*
 + * Modified by Heeler contributors (2026): relay and lookup per root set (getBestUpstreamPerRootSet,
@@ -390,10 +396,11 @@ ext/ZeroTierOne submodule at c53c6bd9c320ea839c525972d8afba448a58606e.
  #ifndef ZT_TOPOLOGY_HPP
  #define ZT_TOPOLOGY_HPP
  
-@@ -120,6 +125,34 @@
- 	SharedPtr<Peer> getUpstreamPeer();
+@@ -109,6 +114,34 @@
+ 	 */
+ 	SharedPtr<Peer> getUpstreamPeer(const uint64_t nwid);
  
- 	/**
++	/**
 +	 * Get the best upstream of each root set: the planet's roots and each moon's (Heeler)
 +	 *
 +	 * Root sets may be independent (a self-hosted planet added as a moon does
@@ -402,7 +409,7 @@ ext/ZeroTierOne submodule at c53c6bd9c320ea839c525972d8afba448a58606e.
 +	 *
 +	 * @param upstreams Filled with at most one peer per root set, planet first
 +	 */
-+	void getBestUpstreamPerRootSet(std::vector< SharedPtr<Peer> > &upstreams);
++	void getBestUpstreamPerRootSet(std::vector<SharedPtr<Peer> >& upstreams);
 +
 +	/**
 +	 * Get the upstreams to relay a packet for a peer through (Heeler)
@@ -414,31 +421,33 @@ ext/ZeroTierOne submodule at c53c6bd9c320ea839c525972d8afba448a58606e.
 +	 * @param dest Destination peer
 +	 * @param relays Filled with the upstreams to send through
 +	 */
-+	void getRelaysFor(const Address &dest,std::vector< SharedPtr<Peer> > &relays);
++	void getRelaysFor(const Address& dest, std::vector<SharedPtr<Peer> >& relays);
 +
 +	/**
 +	 * Record which upstream, if any, relayed to us a packet from a peer on this path (Heeler)
 +	 */
-+	void noteRelayedVia(const Address &peer,const SharedPtr<Path> &path,int64_t now);
++	void noteRelayedVia(const Address& peer, const SharedPtr<Path>& path, int64_t now);
 +
-+	/**
+ 	/**
  	 * @param id Identity to check
  	 * @return True if this is a root server or a network preferred relay from one of our networks
- 	 */
-@@ -442,6 +475,7 @@
- private:
- 	Identity _getIdentity(void *tPtr,const Address &zta);
- 	void _memoizeUpstreams(void *tPtr);
-+	void _bestPerRootSet(int64_t now,const Address *sameSetAs,std::vector< SharedPtr<Peer> > &out); // Heeler
- 	void _savePeer(void *tPtr,const SharedPtr<Peer> &peer);
+@@ -410,6 +443,7 @@
+   private:
+ 	Identity _getIdentity(void* tPtr, const Address& zta);
+ 	void _memoizeUpstreams(void* tPtr);
++	void _bestPerRootSet(int64_t now, const Address* sameSetAs, std::vector<SharedPtr<Peer> >& out);	 // Heeler
+ 	void _savePeer(void* tPtr, const SharedPtr<Peer>& peer);
  
- 	const RuntimeEnvironment *const RR;
-@@ -459,6 +493,8 @@
+ 	const RuntimeEnvironment* const RR;
+@@ -427,6 +461,11 @@
  	std::vector<World> _moons;
- 	std::vector< std::pair<uint64_t,Address> > _moonSeeds;
+ 	std::vector<std::pair<uint64_t, Address> > _moonSeeds;
  	std::vector<Address> _upstreamAddresses;
-+	struct _LearnedVia { Address upstream; int64_t ts; };
-+	Hashtable< Address,_LearnedVia > _learnedVia; // Heeler; guarded by _upstreams_m
++	struct _LearnedVia {
++		Address upstream;
++		int64_t ts;
++	};
++	Hashtable<Address, _LearnedVia> _learnedVia;   // Heeler; guarded by _upstreams_m
  	bool _amUpstream;
- 	Mutex _upstreams_m; // locks worlds, upstream info, moon info, etc.
+ 	Mutex _upstreams_m;	  // locks worlds, upstream info, moon info, etc.
  };

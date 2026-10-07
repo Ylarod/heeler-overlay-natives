@@ -22,8 +22,8 @@ the native code, its patches, and the build.
 | libtailscale | commit `59d4bb82744915815178e0f0776d60026a397ee7` (no tags upstream) | submodule `upstream/libtailscale` |
 | tailscale.com | `v1.102.5` (libtailscale's own go.mod says v1.94.1) | `native/tailscale/go.mod`, `go.sum` |
 | Go | `go1.27.1` darwin-arm64, SHA-256 verified download | `sources.lock` |
-| libzt | commit `a707ea6ae0910efdc1125d04758c411e2e9ea4f9` (main after 1.8.10) | submodule `upstream/libzt` |
-| ZeroTierOne | 1.12.0, commit `c53c6bd9c320ea839c525972d8afba448a58606e` | libzt's submodule `ext/ZeroTierOne` |
+| libzt | commit `00dfa3ee39f13b2cb162dc127ab12dfccf342234` (Ylarod/libzt `update-zerotierone-1.16.2`: zerotier/libzt main `a707ea6` plus ZeroTierOne 1.16.2, blocking `zts_node_stop`, opt-in metrics) | submodule `upstream/libzt` |
+| ZeroTierOne | 1.16.2, commit `fc5c3ec22090b5b2a0f274e863651fe9ca489bf4` | libzt's submodule `ext/ZeroTierOne` |
 | lwIP | commit `32708c0a8b140efb545cc35101ee5fdeca6d6489` (joseph-henry/lwip, STABLE-2_1_x) | libzt's submodule `ext/lwip` |
 | lwIP contrib | commit `4fd612c9c72dfcd1db6618bd59c1a17d9f5b55f8` (joseph-henry/lwip-contrib) | libzt's submodule `ext/lwip-contrib` |
 | EasyTier | 2.7.0 development commit `728ba94b5029240add6204eed591f22e4e039e6b` | submodule `upstream/EasyTier` |
@@ -220,7 +220,7 @@ for the corresponding source.
   and `heeler_et_web_start`), the C types of those declarations (compiled
   against the shipped headers, so the keyed EasyTier ABI v2 signatures, such
   as `heeler_et_web_start`'s seven parameters, are enforced), headers and
-  module maps against this checkout, the 16 notices, and `PROVENANCE.md`
+  module maps against this checkout, the 17 notices, and `PROVENANCE.md`
   against `sources.lock`, the patches, and the glue hashes.
 
 ## Patches
@@ -350,16 +350,19 @@ Both select Xcode 26.3 through `DEVELOPER_DIR`.
   `native/easytier/NOTICE.txt`).
 - Upstream components keep their own licences: libtailscale, Tailscale, and
   Go are BSD-3-Clause (other Go modules as listed in
-  `Tailscale-Go-modules.txt`); libzt and ZeroTierOne are BUSL-1.1 converted to
-  Apache-2.0 on their Change Dates (2026-01-01 and 2025-01-01), with lwIP,
-  lwIP contrib, MiniUPnPc, libnatpmp (BSD-3-Clause), LZ4 (BSD-2-Clause), and
-  nlohmann/json (MIT); EasyTier is LGPL-3.0; the Rust crates and standard
+  `Tailscale-Go-modules.txt`); libzt is BUSL-1.1 converted to Apache-2.0 on
+  its Change Date (2026-01-01); ZeroTierOne 1.16's core (`node/`, `osdep/`)
+  is MPL-2.0 (its source-available `nonfree/` controller is never compiled,
+  and the build checks that); with lwIP, lwIP contrib, MiniUPnPc, libnatpmp
+  (BSD-3-Clause), LZ4 and moodycamel::ConcurrentQueue (BSD-2-Clause), and
+  prometheus-cpp-lite (MIT); EasyTier is LGPL-3.0; the Rust crates and standard
   library linked into CEasyTier are listed with their licence files in
   `EasyTier-Rust-crates.txt`.
-- The build generates all 16 notices into `build/Artifacts/Notices` (and
+- The build generates all 17 notices into `build/Artifacts/Notices` (and
   `Notices.zip` in each release). `ZeroTier-Heeler-modifications.txt` lists
   every libzt/ZeroTierOne patch and the files it changes (Apache-2.0 section
-  4(b)).
+  4(b)) and names the release tag as the Source Code Form of the modified
+  MPL-2.0 files (MPL-2.0 section 3.2).
 
 **LGPL corresponding source.** CEasyTier statically links EasyTier
 (LGPL-3.0). `EasyTier-LGPL-3.0.txt` carries the LGPL-3.0 and GPL-3.0 texts and

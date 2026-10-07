@@ -3,7 +3,7 @@
 	url = https://github.com/tailscale/libtailscale.git
 [submodule "upstream/libzt"]
 	path = upstream/libzt
-	url = https://github.com/zerotier/libzt.git
+	url = https://github.com/Ylarod/libzt.git
 [submodule "upstream/EasyTier"]
 	path = upstream/EasyTier
 	url = https://github.com/EasyTier/EasyTier.git

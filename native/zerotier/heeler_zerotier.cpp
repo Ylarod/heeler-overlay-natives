@@ -11,7 +11,7 @@
 #include "NodeService.hpp"
 
 #include "Buffer.hpp"
-#include "C25519.hpp"
+#include "ECC.hpp"
 #include "Node.hpp"
 #include "SHA512.hpp"
 #include "World.hpp"
@@ -224,7 +224,7 @@ extern "C" int heeler_zt_add_moon(const void* planet, unsigned int length, uint6
         // Nothing checks this signature: a local moon is taken as is, and
         // no root sends an update to a moon it does not know. The key only
         // makes the World well-formed, so it is thrown away.
-        const C25519::Pair key(C25519::generate());
+        const ECC::Pair key(ECC::generate());
         const World built =
             World::make(World::TYPE_MOON, moon_id, parsed.timestamp, key.pub, parsed.roots, key);
         built.serialize(moon, false);

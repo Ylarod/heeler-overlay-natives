@@ -73,6 +73,9 @@ build_zerotier() {
                     -DBUILD_IOS_FRAMEWORK=True \
                     -DIOS_ARM64=True >/dev/null
             cmake --build "${build_dir}" --target zt-static --parallel "${JOBS}" >/dev/null
+            # ZeroTierOne's nonfree/ (source-available) must never be compiled in.
+            ! find "${build_dir}" -name '*.o' -path '*nonfree*' | grep -q . \
+                || die "CZeroTier (${name}) compiled code from ZeroTierOne's nonfree/"
             library="$(find "${build_dir}" -name 'libzt.a' -type f | head -n 1)"
             [[ -n "${library}" ]] || die "libzt.a was not produced for ${name}"
             # Drop local symbols and debug info; the zts_* API stays exported.
@@ -95,7 +98,10 @@ build_zerotier() {
     local notices="${stage}/Notices"
     mkdir -p "${notices}"
     cp "${source}/LICENSE.txt" "${notices}/libzt-BUSL-1.1-Apache-2.0.txt"
-    cp "${zerotierone}/LICENSE.txt" "${notices}/ZeroTierOne-BUSL-1.1-Apache-2.0.txt"
+    # ZeroTierOne 1.16: node/, osdep/ and the rest outside ext/ and nonfree/
+    # are MPL-2.0 (LICENSE.txt says which licence covers what); libzt
+    # compiles nothing from nonfree/.
+    cat "${zerotierone}/LICENSE.txt" "${zerotierone}/LICENSE-MPL.txt" > "${notices}/ZeroTierOne-MPL-2.0.txt"
     # Apache-2.0 section 4(b): each changed file carries its own notice; this
     # lists the changes.
     {
@@ -106,9 +112,12 @@ patches below, applied in order. They are kept in patches/libzt of
 https://github.com/Ylarod/heeler-overlay-natives; the release tag the
 CZeroTier binary was published under holds the exact patches, the pinned
 upstream submodules, and the build scripts. Each file a patch changes carries
-a "Modified by Heeler contributors" notice. libzt and ZeroTierOne are used
-under the Apache License 2.0, to which their Business Source License
-converted on its Change Date. Heeler also adds src/heeler_zerotier.cpp and
+a "Modified by Heeler contributors" notice. libzt is used under the Apache
+License 2.0, to which its Business Source License converted on its Change
+Date. ZeroTierOne's core (node/, osdep/) is used under the Mozilla Public
+License 2.0 (ZeroTierOne-MPL-2.0.txt); the Source Code Form of those files,
+with Heeler's modifications, is that release tag (the pinned ZeroTierOne
+commit plus these patches). Heeler also adds src/heeler_zerotier.cpp and
 src/heeler_zerotier.h (native/zerotier in that repository) to libzt.
 
 EOF
@@ -124,7 +133,8 @@ EOF
     } > "${notices}/ZeroTier-Heeler-modifications.txt"
     cp "${zerotierone}/ext/miniupnpc/LICENSE" "${notices}/miniupnpc-BSD-3-Clause.txt"
     cp "${zerotierone}/ext/libnatpmp/LICENSE" "${notices}/libnatpmp-BSD-3-Clause.txt"
-    cp "${zerotierone}/ext/nlohmann/LICENSE.MIT" "${notices}/nlohmann-json-MIT.txt"
+    cp "${zerotierone}/ext/prometheus-cpp-lite-1.0/LICENSE" "${notices}/prometheus-cpp-lite-MIT.txt"
+    cp "${source}/ext/concurrentqueue/LICENSE.md" "${notices}/concurrentqueue-BSD-2-Clause.txt"
     cp "${source}/ext/lwip/COPYING" "${notices}/lwIP-BSD-3-Clause.txt"
     extract_comment_block "${source}/ext/lwip-contrib/ports/unix/port/sys_arch.c" \
         "Redistribution and use" > "${notices}/lwIP-contrib-BSD-3-Clause.txt"
@@ -132,7 +142,9 @@ EOF
         "BSD 2-Clause License" > "${notices}/ZeroTierOne-LZ4-BSD-2-Clause.txt"
     chmod 644 "${notices}"/*
     grep -q "Change Date:          2026-01-01" "${notices}/libzt-BUSL-1.1-Apache-2.0.txt"
-    grep -q "Change Date:          2025-01-01" "${notices}/ZeroTierOne-BUSL-1.1-Apache-2.0.txt"
+    grep -q "Mozilla Public License Version 2.0" "${notices}/ZeroTierOne-MPL-2.0.txt"
+    grep -q "biaks" "${notices}/prometheus-cpp-lite-MIT.txt"
+    grep -q "Cameron Desrochers" "${notices}/concurrentqueue-BSD-2-Clause.txt"
     grep -q "Yann Collet" "${notices}/ZeroTierOne-LZ4-BSD-2-Clause.txt"
     grep -q "Swedish Institute" "${notices}/lwIP-contrib-BSD-3-Clause.txt"
 
@@ -153,7 +165,7 @@ EOF
 - lwIP: commit ${LWIP_COMMIT} (${LWIP_REPO}, STABLE-2_1_x fork)
 - lwIP contrib: commit ${LWIP_CONTRIB_COMMIT} (${LWIP_CONTRIB_REPO})
 - libzt configuration: BUILD_IOS_FRAMEWORK, zt-static, central API disabled, local symbols stripped
-- ZeroTier licence: BUSL-1.1, converted to Apache-2.0 on the Change Date (libzt 2026-01-01, ZeroTierOne 2025-01-01)
+- ZeroTier licence: libzt BUSL-1.1, converted to Apache-2.0 on its Change Date (2026-01-01); ZeroTierOne MPL-2.0 (node/, osdep/; nothing from nonfree/ is compiled)
 - CMake: $(cmake --version | sed -n '1p')
 EOF
 }
