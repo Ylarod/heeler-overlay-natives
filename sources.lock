@@ -1,0 +1,104 @@
+# Audited inputs of the overlay native XCFrameworks (shell syntax; sourced by
+# scripts/*.sh). Upstream trees are git submodules under upstream/, pinned by
+# the superproject's gitlinks; the commits below must match them, and the
+# build refuses to run otherwise. Every downloaded archive and every committed
+# build input is verified by SHA-256.
+
+# Deployment target of every object in every slice.
+DEPLOYMENT_TARGET="18.0"
+
+# ---------------------------------------------------------------------------
+# Tailscale: libtailscale (Go c-archive) as CTailscale
+# ---------------------------------------------------------------------------
+
+# Go toolchain used to build libtailscale, downloaded and verified; the host's
+# own Go installation is never used.
+GO_VERSION="go1.27.1"
+GO_URL="https://go.dev/dl/go1.27.1.darwin-arm64.tar.gz"
+GO_SHA256="ee215d57e0ec269c60cc9ceca68e6bda321ba9ee5afe24f4b0988703c2d87d12"
+# No GOEXPERIMENT: tailscale.com v1.102.5 builds with Go 1.27's default
+# encoding/json/v2.
+
+# libtailscale has no release tags: submodule upstream/libtailscale.
+LIBTAILSCALE_REPO="https://github.com/tailscale/libtailscale"
+LIBTAILSCALE_COMMIT="59d4bb82744915815178e0f0776d60026a397ee7"
+# The commit's go.mod requires tailscale.com v1.94.1; the build replaces its
+# go.mod and go.sum with native/tailscale/go.mod and go.sum
+# (`go get tailscale.com@v1.102.5 && go mod tidy` in that tree with
+# heeler_tailscale.go added), which pin tailscale.com and every transitive
+# module; module hashes are verified by that go.sum.
+LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION="v1.94.1"
+TAILSCALE_MODULE_VERSION="v1.102.5"
+LIBTAILSCALE_GO_MOD_SHA256="b16f5e5aa627ae354d77f4fc1f8b7ea3c0d68c3c2a47590257b622bf11d15bbc"
+LIBTAILSCALE_GO_SUM_SHA256="36aaa5ce20118a55be656de3747c51a959c60bfa61ee031094fe0a67d5cdff94"
+
+# ---------------------------------------------------------------------------
+# ZeroTier: libzt (ZeroTierOne + lwIP) as CZeroTier
+# ---------------------------------------------------------------------------
+
+# libzt main after tag 1.8.10: submodule upstream/libzt. Its own submodules
+# are pinned by libzt's gitlinks at the commits below (URLs from libzt's
+# .gitmodules).
+LIBZT_REPO="https://github.com/zerotier/libzt"
+LIBZT_COMMIT="a707ea6ae0910efdc1125d04758c411e2e9ea4f9"
+ZEROTIERONE_REPO="https://github.com/zerotier/ZeroTierOne"
+ZEROTIERONE_COMMIT="c53c6bd9c320ea839c525972d8afba448a58606e"
+LWIP_REPO="https://github.com/joseph-henry/lwip"
+LWIP_COMMIT="32708c0a8b140efb545cc35101ee5fdeca6d6489"
+LWIP_CONTRIB_REPO="https://github.com/joseph-henry/lwip-contrib"
+LWIP_CONTRIB_COMMIT="4fd612c9c72dfcd1db6618bd59c1a17d9f5b55f8"
+
+# Patches to libzt and its ext/ZeroTierOne submodule, applied in order at the
+# libzt root to the build copy: "file:sha256" pairs from patches/libzt.
+ZEROTIER_PATCHES="0001-independent-root-sets.patch:9660844650dcaaa360c4e1d198aab702a16a1e87c9eb6965f0a19070819c37fa 0002-managed-gateway-routes.patch:e3bfa3f68274a48b7f1b58d9914083fb608eb200953ba6b0422d0163a9d5b567"
+
+# ---------------------------------------------------------------------------
+# EasyTier: EasyTier through the heeler-easytier crate as CEasyTier
+# ---------------------------------------------------------------------------
+
+# Submodule upstream/EasyTier. 728ba94b is a 2.7.0 development commit, ahead
+# of the 2.7.0 release; move the submodule to the v2.7.0 tag (and refresh the
+# patches and native/easytier/Cargo.lock) once it is released.
+EASYTIER_VERSION="2.7.0"
+EASYTIER_REPO="https://github.com/EasyTier/EasyTier"
+EASYTIER_COMMIT="728ba94b5029240add6204eed591f22e4e039e6b"
+# Patches to that tree, applied in order to the build copy: "file:sha256"
+# pairs from patches/easytier.
+EASYTIER_PATCHES="0001-outbound-only-packet-proxy.patch:462f50093b32092c411c0584280dffccdc71cc528a55fddbbb0b46dd5d15c425 0002-web-client-backend.patch:efbb6003277fb3a835ed12537be8e719b3c41f97a638cf5dfdfdfbbbd87ed45b 0003-websocket-verify-server-certificates.patch:7d2d9822a1c411644cec3f393c7f07d17e43325217187ee6caad0ae7feb84fa5"
+# Rust toolchain (rustup channel); must match native/easytier/rust-toolchain.toml.
+EASYTIER_RUST_TOOLCHAIN="1.95.0"
+
+# ---------------------------------------------------------------------------
+# Committed licence texts (verified, never downloaded by the build)
+# ---------------------------------------------------------------------------
+
+# The Rust project's licence files at the toolchain's release, for the
+# standard-library crates statically linked into CEasyTier (copied from
+# https://raw.githubusercontent.com/rust-lang/rust/1.95.0).
+RUST_LICENSE_SOURCE_URL="https://raw.githubusercontent.com/rust-lang/rust/1.95.0"
+RUST_LICENSE_DIR="licenses/rust-1.95.0"
+RUST_COPYRIGHT_SHA256="172020dbfd5b53a226dfde77616190a48dcff519b0bc0e6deb91a8450782c4af"
+RUST_LICENSE_APACHE_SHA256="62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+RUST_LICENSE_MIT_SHA256="b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1"
+
+# GNU GPL v3 text. LGPL-3.0 (EasyTier's licence) supplements the GPL, and
+# LGPL-3.0 section 4(b) requires a copy of both with the combined work.
+# Byte-identical to https://www.gnu.org/licenses/gpl-3.0.txt.
+GPL3_TEXT_SOURCE_URL="https://www.gnu.org/licenses/gpl-3.0.txt"
+GPL3_TEXT_FILE="licenses/gpl-3.0.txt"
+GPL3_TEXT_SHA256="3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+
+# ---------------------------------------------------------------------------
+# Upstream commit archives (audit only: scripts/audit-upstream.sh)
+# ---------------------------------------------------------------------------
+
+# GitHub's archive of each pinned commit, with the hashes Heeler's
+# Sources.lock audited before this repository existed. The audit downloads
+# them, checks the hashes, and checks that `git archive` of each submodule
+# commit (what the build compiles) holds exactly the same files.
+LIBTAILSCALE_ARCHIVE_SHA256="471b8be37ef774a5c3d2f35e0f2b1c5e9aba9743f457fb5fa71e25bda92f3953"
+LIBZT_ARCHIVE_SHA256="4aeabe808c477d23c9699a765030fae6b1121805d591f63eb40cc2df018405a0"
+ZEROTIERONE_ARCHIVE_SHA256="2993872877da1fa1b64d0043b071e54eb152e5ae1338e5810cbba32607d244bc"
+LWIP_ARCHIVE_SHA256="49e5a5a1c5b4eedcc749abd60e839d4552618fbbe72a6920447e7dcacb3ea4bf"
+LWIP_CONTRIB_ARCHIVE_SHA256="8d0f2c9c54dc2f51e213afc52ebc3be1615a2269d4aa0f93198de86ac67178f3"
+EASYTIER_ARCHIVE_SHA256="cf2c0b80ce52aed965bc356614785a21bcfe62438e6f30622a6587cfa6dffacd"
