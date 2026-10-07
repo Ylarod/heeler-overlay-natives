@@ -30,7 +30,7 @@ jobs:
     env:
       # The toolchain the published artifacts are built with (PROVENANCE.md
       # records it); a different Xcode or SDK gives different bytes.
-      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       HEELER_NATIVES_CACHE_DIR: ${{ github.workspace }}/.natives-cache
     steps:
       - uses: actions/checkout@v5
@@ -54,9 +54,9 @@ jobs:
             ~/.cargo/git
             build/cargo-target
             build/stage
-          key: natives-${{ runner.os }}-xcode26.3-${{ hashFiles('sources.lock', 'scripts/**', 'native/**', 'patches/**', 'include/**', 'licenses/**') }}
+          key: natives-${{ runner.os }}-xcode26.6-${{ hashFiles('sources.lock', 'scripts/**', 'native/**', 'patches/**', 'include/**', 'licenses/**') }}
           restore-keys: |
-            natives-${{ runner.os }}-xcode26.3-
+            natives-${{ runner.os }}-xcode26.6-
 
       - name: Audit submodules against the pinned commit archives
         run: scripts/audit-upstream.sh

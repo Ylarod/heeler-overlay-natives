@@ -29,7 +29,7 @@ the native code, its patches, and the build.
 | EasyTier | 2.7.0 development commit `728ba94b5029240add6204eed591f22e4e039e6b` | submodule `upstream/EasyTier` |
 | Rust | 1.95.0 (rustup) | `native/easytier/rust-toolchain.toml`, `sources.lock` |
 | protoc | 36.2 osx-aarch_64 release, SHA-256 verified download (EasyTier's protobuf code generation) | `sources.lock` |
-| Xcode | 26.3 (17C529), iOS SDK 26.2, CMake 4.4.3 | recorded in `PROVENANCE.md` |
+| Xcode | 26.6 (17F113), iOS SDK 26.5, CMake 4.4.3 | recorded in `PROVENANCE.md` |
 
 EasyTier is pinned to a development commit ahead of 2.7.0. Once v2.7.0 is
 tagged upstream, move the submodule to the tag (see "Upgrading").
@@ -97,7 +97,7 @@ have changed here (see "Native interfaces").
 
 ## Building
 
-Requirements: an Apple silicon Mac with Xcode 26.3, CMake, rustup, Python 3,
+Requirements: an Apple silicon Mac with Xcode 26.6, CMake, rustup, Python 3,
 and `git submodule update --init --recursive`. Then:
 
 ```sh
@@ -337,7 +337,7 @@ project navigator). Its development `Package.swift` serves `build/Artifacts`.
   `reproduce_all` dispatch input), and run the Simulator link probe.
 - `.github/workflows/release.yml`: described under "Releases".
 
-Both select Xcode 26.3 through `DEVELOPER_DIR`.
+Both select Xcode 26.6 through `DEVELOPER_DIR`.
 
 ## Licences
 
