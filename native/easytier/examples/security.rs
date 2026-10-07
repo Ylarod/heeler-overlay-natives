@@ -33,6 +33,7 @@ use heeler_easytier::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const BANNER: &[u8] = b"SSH-2.0-heeler-security\r\n";
+const KEY: &std::ffi::CStr = c"security";
 
 /// Mirrors EasyTierTOML.render in EasyTierNode.swift.
 fn heeler_toml(network: &str, peer: &str) -> CString {
@@ -59,14 +60,14 @@ no_tun = true
 
 fn status() -> String {
     let mut buf = vec![0 as c_char; 512];
-    let n = unsafe { heeler_et_status_json(buf.as_mut_ptr(), buf.len()) };
+    let n = unsafe { heeler_et_status_json(KEY.as_ptr(), buf.as_mut_ptr(), buf.len()) };
     assert!(n >= 0 && (n as usize) < buf.len());
     unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
 }
 
 fn start_a(toml: &CString) {
     let mut err = vec![0 as c_char; 512];
-    let rc = unsafe { heeler_et_start(toml.as_ptr(), 10_000, err.as_mut_ptr(), err.len()) };
+    let rc = unsafe { heeler_et_start(KEY.as_ptr(), toml.as_ptr(), 10_000, err.as_mut_ptr(), err.len()) };
     let message = unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned();
     assert_eq!(rc, 0, "start A: {message}");
 }
@@ -88,7 +89,7 @@ fn a_dials(host: &str) {
     let host_c = CString::new(host).expect("host");
     let mut err = vec![0 as c_char; 512];
     for _ in 0..20 {
-        let fd = unsafe { heeler_et_tcp_connect_fd(host_c.as_ptr(), 22, 3000, err.as_mut_ptr(), err.len()) };
+        let fd = unsafe { heeler_et_tcp_connect_fd(KEY.as_ptr(), std::ptr::null(), host_c.as_ptr(), 22, 3000, err.as_mut_ptr(), err.len()) };
         if fd >= 0 {
             let mut stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
             stream.set_nonblocking(false).expect("blocking");
@@ -248,7 +249,7 @@ no_tun = true
         .await;
     });
     a_dials("10.144.145.2");
-    heeler_et_stop();
+    unsafe { heeler_et_stop(KEY.as_ptr()) };
     rt.block_on(b.stop());
 
     // --- 4: through a shared relay of another network ----------------------
@@ -287,7 +288,7 @@ no_tun = true
     start_a(&heeler_toml("heeler-relayed", "tcp://127.0.0.1:21031"));
     wait_for_ipv4("10.144.146.1");
     a_dials("relayed-peer");
-    heeler_et_stop();
+    unsafe { heeler_et_stop(KEY.as_ptr()) };
     rt.block_on(async {
         peer.stop().await;
         relay.stop().await;

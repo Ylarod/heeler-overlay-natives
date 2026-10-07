@@ -1,5 +1,6 @@
-# heeler-easytier: the C ABI Heeler uses to run one in-process, TUN-less
-# EasyTier node and dial TCP through its userspace (smoltcp) data plane.
+# heeler-easytier: the C ABI Heeler uses to run in-process, TUN-less EasyTier
+# networks side by side and dial TCP through their userspace (smoltcp) data
+# planes.
 #
 # Copyright (C) 2026 Heeler contributors
 #

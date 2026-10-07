@@ -30,14 +30,25 @@ struct LinkProbeTests {
         #expect(result.addMoon < 0)
     }
 
+    @Test func zeroTierNetworkBindingNeedsARunningNode() {
+        let result = LinkProbe.zeroTierNetworkBindingWithoutNode()
+        #expect(result.bind == -2)  // ZTS_ERR_SERVICE
+        #expect(result.reaches == -2)
+        #expect(result.badFamily == -3)  // ZTS_ERR_ARG
+        #expect(result.noAddress == -3)
+    }
+
     @Test func easyTierReportsNoNetwork() {
         #expect(LinkProbe.easyTierStatus().contains("\"running\":false"))
+        #expect(LinkProbe.easyTierStatusInvalidKey() < 0)
     }
 
     @Test func easyTierRefusesInvalidConfigurations() {
         let start = LinkProbe.easyTierStartInvalid()
         #expect(start.code < 0)
         #expect(!start.message.isEmpty)
-        #expect(LinkProbe.easyTierWebStartInvalid() < 0)
+        let web = LinkProbe.easyTierWebStartInvalid()
+        #expect(web.web < 0)
+        #expect(web.dial == -3)  // HEELER_ET_ERR_NOT_RUNNING
     }
 }

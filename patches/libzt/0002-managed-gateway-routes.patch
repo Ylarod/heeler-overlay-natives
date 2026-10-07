@@ -25,8 +25,13 @@ This patch:
 
 Both hooks run on lwIP's tcpip thread with the core lock held. Heeler binds
 each connection to its network's address (heeler_zt_connect), so the
-source hook decides its route. An unbound socket's on-subnet traffic still
-matches a netif before the hook runs. IPv6 gateway routes are not handled,
+source hook decides its route. Two networks can assign the node the same
+address, though, and the hook then takes the first netif holding it; so
+Heeler also binds each connection to its network's netif
+(heeler_zt_bind_network, SO_BINDTODEVICE), and lwIP routes such a socket
+by that netif without consulting the hook (heeler_zt_network_reaches
+applies the same reachability test first). An unbound socket's on-subnet
+traffic still matches a netif before the hook runs. IPv6 gateway routes are not handled,
 as before. Each changed file carries a "Modified by Heeler contributors"
 notice.
 
@@ -120,7 +125,7 @@ Applies to libzt commit a707ea6ae0910efdc1125d04758c411e2e9ea4f9 (src/ only).
  void VirtualTap::lastConfigUpdate(uint64_t lastConfigUpdateTime)
  {
      _lastConfigUpdateTime = lastConfigUpdateTime;
-@@ -639,3 +668,107 @@
+@@ -639,3 +668,110 @@
  }
  
  }   // namespace ZeroTier
@@ -178,6 +183,9 @@ Applies to libzt commit a707ea6ae0910efdc1125d04758c411e2e9ea4f9 (src/ only).
 +    if (src && ! ip4_addr_isany(src)) {
 +        // Called by ip4_route_src before lwIP's own subnet match: a source
 +        // that is a network's address keeps the packet on that network.
++        // When two networks share the address this is the first of them;
++        // a socket bound to its netif (SO_BINDTODEVICE) never gets here,
++        // which is how Heeler keeps such networks apart.
 +        struct netif* own = NULL;
 +        NETIF_FOREACH(n)
 +        {

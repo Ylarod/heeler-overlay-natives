@@ -7,8 +7,8 @@ XCFrameworks and published as a Swift package:
 | Product | Built from | What Heeler uses it for |
 | --- | --- | --- |
 | `CTailscale` | libtailscale (tsnet, Go `c-archive`) + `native/tailscale` | One tsnet node per tailnet; dials TCP for SSH. |
-| `CZeroTier` | libzt (ZeroTierOne + lwIP, C++) + `native/zerotier` | One ZeroTier node per process; networks, moons, self-hosted planets. |
-| `CEasyTier` | EasyTier (Rust, smoltcp, no TUN) through the `heeler-easytier` crate in `native/easytier` | One EasyTier network per process, manual or from a config server. |
+| `CZeroTier` | libzt (ZeroTierOne + lwIP, C++) + `native/zerotier` | One ZeroTier node per process; networks, moons, self-hosted planets; each connection bound to its network's interface, so networks that assign the same address stay apart. |
+| `CEasyTier` | EasyTier (Rust, smoltcp, no TUN) through the `heeler-easytier` crate in `native/easytier` | Any number of networks side by side, one EasyTier instance per instance key (C ABI v2), each manual or from a config server; a config server may assign up to eight; a dial picks the one the destination fits. |
 
 Each XCFramework has an arm64 iPhoneOS slice and an arm64 iPhone Simulator
 slice; every object in them targets iOS 18.0 (`minos 18.0`). The Swift layer
@@ -53,11 +53,46 @@ Package.swift           development manifest (build/Artifacts); release tags car
                         the generated url + checksum manifest
 ```
 
-The glue sources (`native/tailscale/heeler_tailscale.go`,
-`native/zerotier/heeler_zerotier.*`, the shipped headers) are byte-identical
-to the ones Heeler audited; their comments still name Heeler's former paths
-(`NativeSupport/...`), which is deliberate so their hashes and the shipped
-headers stay unchanged.
+The glue sources started as byte-identical copies of the ones Heeler
+audited at `db87976b`; their comments still name Heeler's former paths
+(`NativeSupport/...`). `native/tailscale/heeler_tailscale.go` is unchanged
+since; `native/zerotier/heeler_zerotier.*` and the `heeler-easytier` crate
+have changed here (see "Native interfaces").
+
+## Native interfaces
+
+- **CZeroTier** adds to libzt: `heeler_zt_peers`, `heeler_zt_planet_inspect`,
+  `heeler_zt_add_moon` (see `heeler_zerotier.h`), and for joined networks
+  that assign the node the same address:
+  - `int heeler_zt_bind_network(int fd, uint64_t net_id, int family)` binds
+    a socket to the network's lwIP interface (`SO_BINDTODEVICE`): it sends
+    and receives on that network alone, and lwIP routes it by the interface
+    without consulting patch 0002's source hook. Returns `ZTS_ERR_OK`,
+    `ZTS_ERR_ARG`, `ZTS_ERR_NO_RESULT` (not joined, or no interface for the
+    family yet), `ZTS_ERR_SERVICE`, or `ZTS_ERR_SOCKET`.
+  - `int heeler_zt_network_reaches(uint64_t net_id, int family, const void *address)`
+    tells before connecting whether the network reaches an IPv4 address by
+    itself (its subnet, or one of its managed routes through a gateway on
+    that subnet), so a bound connection to an unreachable address can fail
+    at once instead of timing out: `ZTS_ERR_OK` or `HEELER_ZT_ERR_NO_ROUTE`
+    (-110), else `ZTS_ERR_ARG` / `ZTS_ERR_NO_RESULT` / `ZTS_ERR_SERVICE`.
+    IPv6 is not checked.
+- **CEasyTier** is C ABI version 2 (`HEELER_ET_ABI_VERSION`): every function
+  takes an instance key (1 to 128 bytes of printable UTF-8; at most
+  `HEELER_ET_MAX_INSTANCES`, 32, at once). A key holds one manual network
+  (`heeler_et_start(key, toml, ...)`) or one config-server session
+  (`heeler_et_web_start(key, url, machine_id, hostname, secure_mode, ...)`)
+  running up to `HEELER_ET_MAX_WEB_NETWORKS` (8) networks; starting either
+  replaces only that key. Every network is its own EasyTier instance (own
+  peers, routes, smoltcp stack) on one shared runtime.
+  `heeler_et_tcp_connect_fd(key, network, host, port, ...)` dials through
+  exactly one network: the named one, or (`network` NULL) the only one, the
+  one with a peer at that address or of that name, or the one whose subnet
+  holds the address; several fits return `HEELER_ET_ERR_AMBIGUOUS` (-5).
+  `heeler_et_stop(key)`, `heeler_et_web_stop(key)`, `heeler_et_stop_all()`,
+  and `heeler_et_status_json(key, buf, len)` complete it. Version 1 (one
+  network per process, no keys) is gone; a Heeler build that still uses it
+  does not link against these frameworks.
 
 ## Building
 
@@ -146,9 +181,14 @@ Go, and Rust: `ZERO_AR_DATE=1`; every work directory is remapped to
 `/heeler-overlay` (`-ffile-prefix-map`), the crate to `/heeler-easytier`, the
 target directory to `/target`, Cargo's home to `/cargo`, and `$HOME` to
 `/home` (`--remap-path-prefix`); Go uses `-trimpath` and an empty build ID;
-each XCFramework's `Info.plist` is rewritten with its slices sorted. The
-first release's binaries are byte-identical to the artifacts Heeler accepted
-at commit `db87976b` (`Packages/HeelerOverlay/Artifacts`); check with:
+each XCFramework's `Info.plist` is rewritten with its slices sorted. Static
+archives record their members' owner and group, which new files inherit from
+the build directory: build where the group matches (a directory under
+`/tmp` belongs to `wheel`; `chgrp staff` it first) when comparing builds.
+The binaries built at this repository's commit `25a0093` are byte-identical
+to the artifacts Heeler accepted at commit `db87976b`
+(`Packages/HeelerOverlay/Artifacts`); CTailscale still is, while CZeroTier
+and CEasyTier have changed since. Check with:
 
 ```sh
 scripts/compare-artifacts.sh build/Artifacts <heeler>/Packages/HeelerOverlay/Artifacts
@@ -172,19 +212,20 @@ for the corresponding source.
   that no unlisted file exists), the two arm64 slices, `minos`, platform, and
   architecture of every object, every exported entry point Heeler uses
   (including `heeler_tailscale_logout`, `heeler_tailscale_disable_log_upload`,
-  `heeler_zt_peers`, `heeler_zt_planet_inspect`, `heeler_zt_add_moon`, and
-  `heeler_et_web_start`), the C types of those declarations (compiled against
-  the shipped headers, so `heeler_et_web_start`'s six parameters are
-  enforced), headers and module maps against this checkout, the 16 notices,
-  and `PROVENANCE.md` against `sources.lock`, the patches, and the glue
-  hashes.
+  `heeler_zt_peers`, `heeler_zt_planet_inspect`, `heeler_zt_add_moon`,
+  `heeler_zt_bind_network`, `heeler_zt_network_reaches`, `heeler_et_stop_all`,
+  and `heeler_et_web_start`), the C types of those declarations (compiled
+  against the shipped headers, so the keyed EasyTier ABI v2 signatures, such
+  as `heeler_et_web_start`'s seven parameters, are enforced), headers and
+  module maps against this checkout, the 16 notices, and `PROVENANCE.md`
+  against `sources.lock`, the patches, and the glue hashes.
 
 ## Patches
 
 | Patch | Purpose |
 | --- | --- |
 | `libzt/0001-independent-root-sets.patch` | ZeroTierOne looks peers up in one root of each root set and relays through the root that relayed the peer; adds `Node::addLocalMoon` (self-hosted planets as local moons). |
-| `libzt/0002-managed-gateway-routes.patch` | Installs a network's IPv4 managed gateway routes in lwIP, with a source-routing hook that keeps each network's traffic on it. |
+| `libzt/0002-managed-gateway-routes.patch` | Installs a network's IPv4 managed gateway routes in lwIP, with a source-routing hook that keeps each network's traffic on it (networks sharing an address rely on `heeler_zt_bind_network` instead). |
 | `easytier/0001-outbound-only-packet-proxy.patch` | EasyTier's packet proxy ignores a peer-set exit-node bit and never forwards a peer to loopback. |
 | `easytier/0002-web-client-backend.patch` | Makes the config-server client's backend pluggable (`run_web_client_with_backend`). |
 | `easytier/0003-websocket-verify-server-certificates.patch` | The config-server wss:// connection verifies the server certificate with the system trust store. |
@@ -202,9 +243,14 @@ cd native/easytier
 cargo test --locked
 cargo run --locked --release --example e2e        # two nodes, banner + echo
 cargo run --locked --release --example security   # outbound-only regression
+cargo run --locked --release --example multi      # networks side by side, same subnets
 (cd vendor/easytier && cargo build --release -p easytier-web)
 EASYTIER_WEB=vendor/easytier/target/release/easytier-web \
     cargo run --locked --release --example webconfig   # config-server mode
+EASYTIER_WEB=vendor/easytier/target/release/easytier-web \
+    cargo run --locked --release --example multi       # plus a multi-network session
+# Peers for Heeler's EasyTierMultiLiveTests (127.0.0.1:21310-21312, web 22550/11750):
+cargo run --locked --release --example multi-peer -- --web vendor/easytier/target/release/easytier-web
 ```
 
 ## Upgrading

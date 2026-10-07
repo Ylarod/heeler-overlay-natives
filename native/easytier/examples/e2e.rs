@@ -25,6 +25,7 @@ use heeler_easytier::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const BANNER: &[u8] = b"SSH-2.0-heeler-e2e\r\n";
+const KEY: &std::ffi::CStr = c"e2e";
 
 fn node_a_toml(instance_name: &str, ipv4: Option<&str>) -> CString {
     node_a_toml_via(instance_name, ipv4, "tcp://127.0.0.1:21010")
@@ -54,21 +55,21 @@ no_tun = true
 
 fn status() -> String {
     let mut buf = vec![0 as c_char; 4096];
-    let n = unsafe { heeler_et_status_json(buf.as_mut_ptr(), buf.len()) };
+    let n = unsafe { heeler_et_status_json(KEY.as_ptr(), buf.as_mut_ptr(), buf.len()) };
     assert!(n >= 0 && (n as usize) < buf.len(), "status_json returned {n}");
     unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
 }
 
 fn start(toml: &CString) -> (c_int, String) {
     let mut err = vec![0 as c_char; 512];
-    let rc = unsafe { heeler_et_start(toml.as_ptr(), 10_000, err.as_mut_ptr(), err.len()) };
+    let rc = unsafe { heeler_et_start(KEY.as_ptr(), toml.as_ptr(), 10_000, err.as_mut_ptr(), err.len()) };
     (rc, unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned())
 }
 
 fn connect(host: &str, port: u16, timeout_ms: u32) -> (c_int, String) {
     let host = CString::new(host).expect("host");
     let mut err = vec![0 as c_char; 512];
-    let fd = unsafe { heeler_et_tcp_connect_fd(host.as_ptr(), port, timeout_ms, err.as_mut_ptr(), err.len()) };
+    let fd = unsafe { heeler_et_tcp_connect_fd(KEY.as_ptr(), std::ptr::null(), host.as_ptr(), port, timeout_ms, err.as_mut_ptr(), err.len()) };
     (fd, unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned())
 }
 
@@ -266,11 +267,11 @@ no_tun = true
     exercise(fd);
     eprintln!("[{:?}] wss:// peer with a self-signed certificate connected and dialled", t5.elapsed());
 
-    heeler_et_stop();
+    unsafe { heeler_et_stop(KEY.as_ptr()) };
     eprintln!("status after stop: {}", status());
     let (rc, err) = connect("10.144.144.2", 22, 1000);
     assert_eq!(rc, HEELER_ET_ERR_NOT_RUNNING, "{err}");
-    heeler_et_stop();
+    unsafe { heeler_et_stop(KEY.as_ptr()) };
     rt.block_on(b.stop());
     println!("E2E OK");
 }

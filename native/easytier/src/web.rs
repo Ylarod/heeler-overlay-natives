@@ -13,17 +13,21 @@
 //   local TOML gets, after `listener_urls` is dropped (EasyTier's console
 //   adds listeners by default) and a credential file, disabled encryption or
 //   managed credentials are refused;
-// - one network at a time: another one fails and is reported to the server
-//   as a failed instance;
+// - up to MAX_WEB_NETWORKS networks run side by side, each its own EasyTier
+//   instance; one more, or a second network with a name already running, is
+//   refused and reported to the server as a failed instance;
 // - config patches are refused (they would change a running network past the
 //   policy), and the configuration the server sent is echoed back unchanged,
 //   so its reconcile does not see the forced flags as drift and restart us;
 // - network reports leave out every underlay address: this device's
 //   interface, LAN and public addresses, and its peers' public addresses.
+//
+// A dial through the session goes through exactly one of its networks (see
+// `select`): the one it names, the only one, or the one the destination fits.
 
 use std::{
     collections::{BTreeMap, HashMap},
-
+    net::Ipv4Addr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -33,10 +37,9 @@ use std::{
 
 use async_trait::async_trait;
 use easytier::common::config::{ConfigLoader, TomlConfigLoader};
-use easytier::instance::factory::create_native_instance;
 use easytier::proto::{
     api::{
-        instance::{PeerInfo, Route},
+        instance::{InstanceIdentifier, PeerInfo, Route, instance_identifier::Selector},
         config::{
             ConfigRpc, ConfigRpcServer, GetConfigRequest, GetConfigResponse, PatchConfigRequest,
             PatchConfigResponse,
@@ -65,7 +68,11 @@ use easytier_core::{
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 
-use crate::{CURRENT, Failure, Owner, Running, lock, outbound_only_config, stop_bounded};
+use crate::{
+    Failure, HEELER_ET_ERR_AMBIGUOUS, HEELER_ET_ERR_NOT_RUNNING, HEELER_ET_ERR_UNRESOLVED, NativeCoreInstance, Slot,
+    check_capacity, check_key, hostname_matches, instance_status, is_live, key_lock, lock, outbound_only_config,
+    peer_addresses, start_instance, stop_bounded, with_slots,
+};
 
 /// How long a server-sent network may take to start.
 const WEB_START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -74,13 +81,30 @@ const FALLBACK_HOSTNAME: &str = "Heeler";
 /// How many refused networks the session remembers (the most recent ones), so
 /// a server cannot grow the state and the status without bound.
 const MAX_FAILURES: usize = 16;
+/// How many networks one session runs at once, so a server cannot start
+/// instances (each with its own tasks, peers and buffers) without bound.
+pub const MAX_WEB_NETWORKS: usize = 8;
 
-/// The running session, if any.
-static SESSION: Mutex<Option<Session>> = Mutex::new(None);
-
-struct Session {
+/// One key's config-server session.
+pub(crate) struct Session {
     key: SessionKey,
     client: WebClient<()>,
+    state: Arc<WebState>,
+}
+
+impl Session {
+    pub(crate) fn state(&self) -> Arc<WebState> {
+        self.state.clone()
+    }
+
+    /// What the status needs, taken under the slots lock.
+    pub(crate) fn view(&self) -> SessionView {
+        SessionView { connected: self.client.is_connected(), state: self.state.clone() }
+    }
+}
+
+pub(crate) struct SessionView {
+    connected: bool,
     state: Arc<WebState>,
 }
 
@@ -101,12 +125,27 @@ struct RunFailure {
     sequence: u64,
 }
 
-struct WebState {
+/// A network the session runs.
+#[derive(Clone)]
+struct WebNetwork {
+    instance: Arc<NativeCoreInstance>,
+    /// The configuration exactly as the server sent it.
+    config: NetworkConfig,
+    /// The checked TOML it became.
+    toml: String,
+}
+
+impl WebNetwork {
+    fn name(&self) -> String {
+        self.config.network_name.clone().unwrap_or_default()
+    }
+}
+
+pub(crate) struct WebState {
     machine_id: Uuid,
     hostname: String,
-    /// The network this session runs: its instance ID and the configuration
-    /// exactly as the server sent it.
-    owned: Mutex<Option<(Uuid, NetworkConfig)>>,
+    /// The networks this session runs, by instance ID.
+    networks: Mutex<BTreeMap<Uuid, WebNetwork>>,
     failures: Mutex<HashMap<Uuid, RunFailure>>,
     failure_sequence: AtomicU64,
     generation: AtomicUsize,
@@ -122,7 +161,7 @@ impl WebState {
         Self {
             machine_id,
             hostname,
-            owned: Mutex::new(None),
+            networks: Mutex::new(BTreeMap::new()),
             failures: Mutex::new(HashMap::new()),
             failure_sequence: AtomicU64::new(0),
             generation: AtomicUsize::new(0),
@@ -132,15 +171,16 @@ impl WebState {
         }
     }
 
-    fn owned_id(&self) -> Option<Uuid> {
-        lock(&self.owned).as_ref().map(|(id, _)| *id)
+    fn ids(&self) -> Vec<Uuid> {
+        lock(&self.networks).keys().copied().collect()
     }
 
-    fn owned_config(&self, id: Uuid) -> Option<NetworkConfig> {
-        lock(&self.owned)
-            .as_ref()
-            .filter(|(owned, _)| *owned == id)
-            .map(|(_, config)| config.clone())
+    fn network(&self, id: Uuid) -> Option<WebNetwork> {
+        lock(&self.networks).get(&id).cloned()
+    }
+
+    fn snapshot(&self) -> Vec<(Uuid, WebNetwork)> {
+        lock(&self.networks).iter().map(|(id, network)| (*id, network.clone())).collect()
     }
 
     /// Records a refused network, keeping the `MAX_FAILURES` most recent.
@@ -161,6 +201,22 @@ impl WebState {
     fn changed(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.changed.notify_waiters();
+    }
+
+    /// Stops and forgets the networks `remove` matches, concurrently.
+    async fn stop_networks(&self, remove: impl Fn(&Uuid) -> bool) {
+        let removed = {
+            let mut networks = lock(&self.networks);
+            let ids = networks.keys().copied().filter(|id| remove(id)).collect::<Vec<_>>();
+            ids.into_iter().filter_map(|id| networks.remove(&id)).collect::<Vec<_>>()
+        };
+        let stops = removed
+            .into_iter()
+            .map(|network| tokio::spawn(async move { stop_bounded(&network.instance).await }))
+            .collect::<Vec<_>>();
+        for stop in stops {
+            let _ = stop.await;
+        }
     }
 }
 
@@ -198,31 +254,6 @@ fn checked_web_config(
     let checked = outbound_only_config(&loader.dump()).map_err(|failure| failure.message)?;
     let toml = checked.dump();
     Ok((checked, toml))
-}
-
-/// Stops the session's network, if it still owns the running one.
-async fn stop_owned(state: &WebState) {
-    let previous = {
-        let mut current = lock(&CURRENT);
-        if current.as_ref().is_some_and(|running| running.owner == Owner::Web) {
-            current.take()
-        } else {
-            None
-        }
-    };
-    if let Some(previous) = previous {
-        stop_bounded(&previous.instance).await;
-    }
-    *lock(&state.owned) = None;
-}
-
-fn owned_instance(state: &WebState) -> Option<(Uuid, Arc<crate::NativeCoreInstance>)> {
-    let id = state.owned_id()?;
-    let current = lock(&CURRENT);
-    current
-        .as_ref()
-        .filter(|running| running.owner == Owner::Web)
-        .map(|running| (id, running.instance.clone()))
 }
 
 /// Strips every underlay address from a network report: the server learns
@@ -270,6 +301,26 @@ fn redact_running_info(info: &mut NetworkInstanceRunningInfo) {
     }
 }
 
+/// Why a server's network may not join the ones running, if it may not:
+/// the session is full, or another instance runs a network of that name
+/// (dials name networks, so names stay unique).
+fn admission_error(running: &[(Uuid, String)], id: Uuid, network_name: &str) -> Option<String> {
+    let others = running.iter().filter(|(other, _)| *other != id).collect::<Vec<_>>();
+    if let Some((_, name)) = others.iter().find(|(_, name)| name == network_name) {
+        return Some(format!(
+            "Heeler already runs an EasyTier network named \"{name}\" for this config server; \
+             delete or rename one of them"
+        ));
+    }
+    if others.len() >= MAX_WEB_NETWORKS {
+        return Some(format!(
+            "Heeler runs at most {MAX_WEB_NETWORKS} EasyTier networks per config server; \
+             disable or delete one first"
+        ));
+    }
+    None
+}
+
 #[derive(Clone)]
 struct Backend(Arc<WebState>);
 
@@ -288,51 +339,32 @@ impl Backend {
         if state.closed.load(Ordering::Acquire) {
             return Err(fail("the config-server session has ended".to_owned()));
         }
-        if let Some(owned) = state.owned_id() {
-            if owned != id {
-                let running = lock(&state.owned)
-                    .as_ref()
-                    .and_then(|(_, config)| config.network_name.clone())
-                    .unwrap_or_default();
-                return Err(fail(format!(
-                    "Heeler runs one EasyTier network per device and \"{running}\" is already running; \
-                     disable or delete it first"
-                )));
-            }
-            let live = owned_instance(state).is_some_and(|(_, instance)| crate::is_live(&instance));
-            if live && !request.overwrite {
-                return Ok(id);
-            }
+        if let Some(existing) = state.network(id)
+            && is_live(&existing.instance)
+            && !request.overwrite
+        {
+            return Ok(id);
+        }
+        let running = state.snapshot().into_iter().map(|(id, network)| (id, network.name())).collect::<Vec<_>>();
+        if let Some(message) = admission_error(&running, id, &network_name) {
+            return Err(fail(message));
         }
         let (checked, toml) = checked_web_config(&original, id, &state.hostname).map_err(fail)?;
-        stop_owned(state).await;
-        let instance = create_native_instance(checked).map_err(|error| fail(format!("{error:#}")))?;
-        match tokio::time::timeout(WEB_START_TIMEOUT, instance.start()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                stop_bounded(&instance).await;
-                return Err(fail(format!("{error:#}")));
-            }
-            Err(_) => {
-                stop_bounded(&instance).await;
-                return Err(fail(format!("EasyTier did not start within {WEB_START_TIMEOUT:?}")));
-            }
-        }
-        *lock(&CURRENT) = Some(Running { instance, toml, owner: Owner::Web });
-        *lock(&state.owned) = Some((id, original));
+        // A rerun (or overwrite) replaces this network only.
+        state.stop_networks(|other| *other == id).await;
+        let instance = start_instance(checked, WEB_START_TIMEOUT).await.map_err(|failure| fail(failure.message))?;
+        lock(&state.networks).insert(id, WebNetwork { instance, config: original, toml });
         Ok(id)
     }
 
-    /// Stops the network unless `keep` holds its ID, and forgets failures
-    /// `forget` matches.
+    /// Stops the networks `keep` does not hold, forgets failures it does
+    /// not hold, and returns the networks left.
     async fn remove(&self, keep: impl Fn(&Uuid) -> bool) -> Vec<Uuid> {
         let state = &self.0;
         lock(&state.failures).retain(|id, _| keep(id));
-        if state.owned_id().is_some_and(|owned| !keep(&owned)) {
-            stop_owned(state).await;
-        }
+        state.stop_networks(|id| !keep(id)).await;
         state.changed();
-        state.owned_id().into_iter().collect()
+        state.ids()
     }
 }
 
@@ -344,7 +376,7 @@ impl WebClientBackend for Backend {
     }
 
     async fn instance_ids(&self) -> anyhow::Result<Vec<Uuid>> {
-        Ok(self.0.owned_id().into_iter().collect())
+        Ok(self.0.ids())
     }
 
     fn failed_instance_ids(&self) -> Vec<Uuid> {
@@ -429,10 +461,11 @@ impl WebClientService for Backend {
     ) -> rpc_types::error::Result<CollectNetworkInfoResponse> {
         let wanted = request.inst_ids.into_iter().map(Uuid::from).collect::<Vec<_>>();
         let mut map = BTreeMap::new();
-        if let Some((id, instance)) = owned_instance(&self.0)
-            && (wanted.is_empty() || wanted.contains(&id))
-        {
-            let mut info = network_instance_running_info(&instance).await?;
+        for (id, network) in self.0.snapshot() {
+            if !wanted.is_empty() && !wanted.contains(&id) {
+                continue;
+            }
+            let mut info = network_instance_running_info(&network.instance).await?;
             redact_running_info(&mut info);
             map.insert(id.to_string(), info);
         }
@@ -447,7 +480,7 @@ impl WebClientService for Backend {
         _: ListNetworkInstanceRequest,
     ) -> rpc_types::error::Result<ListNetworkInstanceResponse> {
         Ok(ListNetworkInstanceResponse {
-            inst_ids: self.0.owned_id().into_iter().map(Into::into).collect(),
+            inst_ids: self.0.ids().into_iter().map(Into::into).collect(),
         })
     }
 
@@ -470,12 +503,9 @@ impl WebClientService for Backend {
         request: GetNetworkInstanceConfigRequest,
     ) -> rpc_types::error::Result<GetNetworkInstanceConfigResponse> {
         let id = Uuid::from(request.inst_id.ok_or_else(|| rpc_error("instance id is required"))?);
-        let config = self
-            .0
-            .owned_config(id)
-            .ok_or_else(|| rpc_error("instance config control not found"))?;
+        let network = self.0.network(id).ok_or_else(|| rpc_error("instance config control not found"))?;
         Ok(GetNetworkInstanceConfigResponse {
-            config: Some(config),
+            config: Some(network.config),
             source: ConfigSource::Web as i32,
         })
     }
@@ -489,9 +519,9 @@ impl WebClientService for Backend {
             .inst_ids
             .into_iter()
             .map(Uuid::from)
-            .filter_map(|id| self.0.owned_config(id).map(|config| (id, config)))
-            .map(|(id, config)| {
-                let name = config.network_name.unwrap_or_default();
+            .filter_map(|id| self.0.network(id).map(|network| (id, network)))
+            .map(|(id, network)| {
+                let name = network.name();
                 NetworkMeta {
                     inst_id: Some(id.into()),
                     network_name: name.clone(),
@@ -502,6 +532,25 @@ impl WebClientService for Backend {
             })
             .collect();
         Ok(ListNetworkInstanceMetaResponse { metas })
+    }
+}
+
+/// The network a ConfigRpc request means: the one its identifier selects by
+/// ID or name, or the only one when it names none.
+fn identified_network(state: &WebState, instance: Option<&InstanceIdentifier>) -> Option<WebNetwork> {
+    let networks = state.snapshot();
+    match instance.and_then(|instance| instance.selector.as_ref()) {
+        Some(Selector::Id(id)) => {
+            let id = Uuid::from(*id);
+            networks.into_iter().find(|(other, _)| *other == id).map(|(_, network)| network)
+        }
+        Some(Selector::InstanceSelector(selector)) => match selector.name.as_deref() {
+            Some(name) => networks.into_iter().find(|(_, network)| network.name() == name).map(|(_, network)| network),
+            None if networks.len() == 1 => networks.into_iter().next().map(|(_, network)| network),
+            None => None,
+        },
+        None if networks.len() == 1 => networks.into_iter().next().map(|(_, network)| network),
+        None => None,
     }
 }
 
@@ -522,19 +571,144 @@ impl ConfigRpc for Backend {
     async fn get_config(
         &self,
         _: BaseController,
-        _: GetConfigRequest,
+        request: GetConfigRequest,
     ) -> rpc_types::error::Result<GetConfigResponse> {
-        let config = lock(&self.0.owned)
-            .as_ref()
-            .map(|(_, config)| config.clone())
-            .ok_or_else(|| rpc_error("no network is running"))?;
-        let toml_config = lock(&CURRENT)
-            .as_ref()
-            .filter(|running| running.owner == Owner::Web)
-            .map(|running| running.toml.clone())
-            .unwrap_or_default();
-        Ok(GetConfigResponse { config: Some(config), toml_config })
+        let network = identified_network(&self.0, request.instance.as_ref())
+            .ok_or_else(|| rpc_error("no such network is running"))?;
+        Ok(GetConfigResponse { config: Some(network.config), toml_config: network.toml })
     }
+}
+
+/// What dial selection knows about one running network.
+#[derive(Debug, Clone)]
+struct Candidate {
+    id: Uuid,
+    name: String,
+    /// This device's address and prefix on it.
+    own: Option<(Ipv4Addr, u8)>,
+    /// Every other node's hostname and address.
+    peers: Vec<(String, Option<Ipv4Addr>)>,
+}
+
+fn in_subnet(address: Ipv4Addr, (own, prefix): (Ipv4Addr, u8)) -> bool {
+    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - u32::from(prefix.min(32))) };
+    u32::from(address) & mask == u32::from(own) & mask
+}
+
+fn ambiguous(host: &str, which: &[&Candidate]) -> Failure {
+    let names = which.iter().map(|candidate| format!("\"{}\"", candidate.name)).collect::<Vec<_>>().join(", ");
+    Failure::new(
+        HEELER_ET_ERR_AMBIGUOUS,
+        format!(
+            "{host} is on more than one of the config server's EasyTier networks ({names}); \
+             give the networks different subnets or peer names"
+        ),
+    )
+}
+
+/// Picks the network a dial without a named network goes through:
+///
+/// 1. the only network the session runs;
+/// 2. for an IPv4 literal, the one network with a peer at exactly that
+///    address, else the one network whose own subnet holds it;
+/// 3. for a hostname, the one network with a peer of that name.
+///
+/// More than one fit at the deciding step fails with HEELER_ET_ERR_AMBIGUOUS
+/// rather than guessing; none fails with HEELER_ET_ERR_UNRESOLVED. Peers'
+/// advertised subnets (proxy_cidrs) never select a network, so a peer of one
+/// network cannot draw another network's traffic by advertising a route.
+fn choose(candidates: &[Candidate], host: &str) -> Result<Uuid, Failure> {
+    if let [only] = candidates {
+        return Ok(only.id);
+    }
+    let one = |fits: Vec<&Candidate>| -> Option<Result<Uuid, Failure>> {
+        match fits.as_slice() {
+            [] => None,
+            [only] => Some(Ok(only.id)),
+            many => Some(Err(ambiguous(host, many))),
+        }
+    };
+    if let Ok(address) = host.parse::<Ipv4Addr>() {
+        let exact = candidates
+            .iter()
+            .filter(|candidate| candidate.peers.iter().any(|(_, peer)| *peer == Some(address)))
+            .collect();
+        if let Some(result) = one(exact) {
+            return result;
+        }
+        let subnet = candidates
+            .iter()
+            .filter(|candidate| candidate.own.is_some_and(|own| in_subnet(address, own)))
+            .collect();
+        if let Some(result) = one(subnet) {
+            return result;
+        }
+    } else {
+        let named = candidates
+            .iter()
+            .filter(|candidate| candidate.peers.iter().any(|(name, _)| hostname_matches(name, host)))
+            .collect();
+        if let Some(result) = one(named) {
+            return result;
+        }
+    }
+    Err(Failure::new(
+        HEELER_ET_ERR_UNRESOLVED,
+        format!("{host} is on none of the config server's EasyTier networks"),
+    ))
+}
+
+/// The instance a dial through the session goes through: the network named
+/// `network` (by name or instance ID), or the one `choose` picks.
+pub(crate) async fn select(
+    state: &WebState,
+    network: Option<&str>,
+    host: &str,
+) -> Result<Arc<NativeCoreInstance>, Failure> {
+    let networks = state.snapshot().into_iter().filter(|(_, network)| is_live(&network.instance)).collect::<Vec<_>>();
+    if networks.is_empty() {
+        return Err(Failure::new(
+            HEELER_ET_ERR_NOT_RUNNING,
+            "the config server has not assigned a running network to this device",
+        ));
+    }
+    if let Some(wanted) = network {
+        return networks
+            .into_iter()
+            .find(|(id, network)| network.name() == wanted || id.to_string().eq_ignore_ascii_case(wanted))
+            .map(|(_, network)| network.instance)
+            .ok_or_else(|| {
+                Failure::new(
+                    HEELER_ET_ERR_UNRESOLVED,
+                    format!("the config server runs no EasyTier network \"{wanted}\" on this device"),
+                )
+            });
+    }
+    let mut candidates = Vec::with_capacity(networks.len());
+    if networks.len() > 1 {
+        for (id, network) in &networks {
+            let node = network.instance.node_snapshot().await;
+            candidates.push(Candidate {
+                id: *id,
+                name: network.name(),
+                own: node.ipv4_addr.map(|inet| (inet.address(), inet.network_length())),
+                peers: peer_addresses(&network.instance).await,
+            });
+        }
+    } else {
+        candidates.extend(networks.iter().map(|(id, network)| Candidate {
+            id: *id,
+            name: network.name(),
+            own: None,
+            peers: Vec::new(),
+        }));
+    }
+    let chosen = choose(&candidates, host)?;
+    networks
+        .into_iter()
+        .find(|(id, _)| *id == chosen)
+        .map(|(_, network)| network.instance)
+        .ok_or_else(|| Failure::new(HEELER_ET_ERR_NOT_RUNNING, "the network stopped"))
 }
 
 /// Checks a config-server URL: `udp://` or `tcp://` with a host and a port, or
@@ -566,44 +740,47 @@ fn parse_machine_id(text: &str) -> Result<Uuid, Failure> {
     }
 }
 
-/// Ends the session and stops its network. The caller holds LIFECYCLE.
-pub(crate) fn shutdown(rt: &Runtime) {
-    let Some(session) = lock(&SESSION).take() else { return };
+/// Ends a session removed from its key and stops its networks. The caller
+/// holds the key's lifecycle lock.
+pub(crate) fn shutdown(rt: &Runtime, session: Session) {
     let state = session.state.clone();
     state.closed.store(true, Ordering::Release);
     rt.block_on(async {
         // Waits out a handler that is starting or stopping a network.
         let _mutation = state.mutation.lock().await;
-        stop_owned(&state).await;
+        state.stop_networks(|_| true).await;
     });
     let _context = rt.enter();
     drop(session);
 }
 
-/// Starts (or keeps) the session for `url`, replacing any other session or
-/// manual network.
+/// Starts (or keeps) `key`'s session for `url`, replacing anything else the
+/// key held.
 pub(crate) fn start(
+    key: &str,
     url: &str,
     machine_id: &str,
     hostname: &str,
     secure_mode: bool,
 ) -> Result<std::ffi::c_int, Failure> {
     let rt = crate::runtime()?;
+    let key = check_key(key)?;
     check_url(url)?;
     let machine_id = parse_machine_id(machine_id)?;
     let hostname = match hostname.trim() {
         "" => FALLBACK_HOSTNAME.to_owned(),
         name => name.to_owned(),
     };
-    let key = SessionKey { url: url.to_owned(), machine_id, hostname: hostname.clone(), secure_mode };
-    let _lifecycle = lock(&crate::LIFECYCLE);
-    if lock(&SESSION).as_ref().is_some_and(|session| session.key == key) {
+    let session_key = SessionKey { url: url.to_owned(), machine_id, hostname: hostname.clone(), secure_mode };
+    let key_lock = key_lock(key);
+    let _lifecycle = lock(&key_lock);
+    let unchanged = with_slots(|slots| matches!(slots.get(key), Some(Slot::Web(session)) if session.key == session_key));
+    if unchanged {
         return Ok(crate::HEELER_ET_OK);
     }
-    shutdown(rt);
-    let previous = lock(&CURRENT).take();
-    if let Some(previous) = previous {
-        rt.block_on(async move { stop_bounded(&previous.instance).await });
+    check_capacity(key)?;
+    if let Some(previous) = with_slots(|slots| slots.remove(key)) {
+        crate::stop_slot(rt, previous);
     }
     let state = Arc::new(WebState::new(machine_id, hostname.clone()));
     let _context = rt.enter();
@@ -618,42 +795,46 @@ pub(crate) fn start(
     // (patch 0003) does.
     let client =
         run_web_client_with_backend(url, machine_id, hostname, secure_mode, Arc::new(Backend(state.clone())))?;
-    *lock(&SESSION) = Some(Session { key, client, state });
+    with_slots(|slots| slots.insert(key.to_owned(), Slot::Web(Session { key: session_key, client, state })));
     Ok(crate::HEELER_ET_OK)
 }
 
-/// Ends the session and its network, if any.
-pub(crate) fn stop() {
-    let Ok(rt) = crate::runtime() else { return };
-    let _lifecycle = lock(&crate::LIFECYCLE);
-    shutdown(rt);
-}
-
-/// The session's `web` status object, or nil without a session.
-pub(crate) fn status() -> Option<serde_json::Value> {
-    let session = lock(&SESSION);
-    let session = session.as_ref()?;
-    let state = &session.state;
-    let owned = lock(&state.owned).clone();
+/// A session's status:
+/// `{"mode":"web","running":bool,"web":{...,"networks":[...]}}`, where
+/// `running` is whether any network runs. Runs inside the runtime.
+pub(crate) async fn status(view: SessionView) -> serde_json::Value {
+    let state = &view.state;
     let mut failures = lock(&state.failures)
         .iter()
         .map(|(id, failure)| (*id, failure.clone()))
         .collect::<Vec<_>>();
     failures.sort_by_key(|(_, failure)| failure.sequence);
-    Some(serde_json::json!({
-        "connected": session.client.is_connected(),
-        "machine_id": state.machine_id.to_string(),
-        "instance_id": owned.as_ref().map(|(id, _)| id.to_string()),
-        "network_name": owned.and_then(|(_, config)| config.network_name),
-        "failures": failures
-            .into_iter()
-            .map(|(id, failure)| serde_json::json!({
-                "instance_id": id.to_string(),
-                "network_name": failure.network_name,
-                "message": failure.message,
-            }))
-            .collect::<Vec<_>>(),
-    }))
+    let mut networks = Vec::new();
+    let mut running = false;
+    for (id, network) in state.snapshot() {
+        let mut json = instance_status(&network.instance).await;
+        running |= json.get("running") == Some(&serde_json::Value::Bool(true));
+        json.insert("instance_id".to_owned(), id.to_string().into());
+        json.insert("network_name".to_owned(), network.name().into());
+        networks.push(serde_json::Value::Object(json));
+    }
+    serde_json::json!({
+        "mode": "web",
+        "running": running,
+        "web": {
+            "connected": view.connected,
+            "machine_id": state.machine_id.to_string(),
+            "networks": networks,
+            "failures": failures
+                .into_iter()
+                .map(|(id, failure)| serde_json::json!({
+                    "instance_id": id.to_string(),
+                    "network_name": failure.network_name,
+                    "message": failure.message,
+                }))
+                .collect::<Vec<_>>(),
+        },
+    })
 }
 
 
@@ -874,20 +1055,91 @@ mod tests {
         assert!(listed.inst_ids.is_empty());
     }
 
+    #[test]
+    fn networks_are_admitted_up_to_the_limit_with_unique_names() {
+        let running = (0..MAX_WEB_NETWORKS - 1).map(|n| (Uuid::new_v4(), format!("net-{n}"))).collect::<Vec<_>>();
+        assert_eq!(admission_error(&running, Uuid::new_v4(), "another"), None);
+        // A rerun of a running network is not a new one.
+        assert_eq!(admission_error(&running, running[0].0, "net-0"), None);
+        let duplicate = admission_error(&running, Uuid::new_v4(), "net-3").expect("refused");
+        assert!(duplicate.contains("already runs an EasyTier network named \"net-3\""), "{duplicate}");
+        let mut full = running.clone();
+        full.push((Uuid::new_v4(), "last".to_owned()));
+        let refused = admission_error(&full, Uuid::new_v4(), "one-too-many").expect("refused");
+        assert!(refused.contains(&format!("at most {MAX_WEB_NETWORKS}")), "{refused}");
+        assert_eq!(admission_error(&full, full[2].0, "net-2"), None);
+    }
+
+    fn candidate(name: &str, own: Option<&str>, peers: &[(&str, &str)]) -> Candidate {
+        let own = own.map(|text| {
+            let (address, prefix) = text.split_once('/').expect("cidr");
+            (address.parse().expect("address"), prefix.parse().expect("prefix"))
+        });
+        Candidate {
+            id: Uuid::new_v4(),
+            name: name.to_owned(),
+            own,
+            peers: peers.iter().map(|(host, address)| ((*host).to_owned(), address.parse().ok())).collect(),
+        }
+    }
+
+    #[test]
+    fn dials_pick_the_one_network_the_destination_fits() {
+        let a = candidate("alpha", Some("10.144.144.1/24"), &[("build", "10.144.144.2"), ("shared", "10.144.144.3")]);
+        let b = candidate("beta", Some("10.150.0.1/16"), &[("db", "10.150.3.4"), ("shared", "10.150.3.5")]);
+        let both = [a.clone(), b.clone()];
+        // The only network takes every dial, even one it does not route.
+        assert_eq!(choose(std::slice::from_ref(&a), "192.0.2.1").ok(), Some(a.id));
+        // An exact peer address, then the own subnet.
+        assert_eq!(choose(&both, "10.144.144.2").ok(), Some(a.id));
+        assert_eq!(choose(&both, "10.150.3.4").ok(), Some(b.id));
+        assert_eq!(choose(&both, "10.144.144.77").ok(), Some(a.id));
+        assert_eq!(choose(&both, "10.150.200.9").ok(), Some(b.id));
+        // A hostname: the network with a peer of that name.
+        assert_eq!(choose(&both, "BUILD.et.net").ok(), Some(a.id));
+        assert_eq!(choose(&both, "db").ok(), Some(b.id));
+        let shared = choose(&both, "shared").err().expect("ambiguous");
+        assert_eq!(shared.code, HEELER_ET_ERR_AMBIGUOUS);
+        assert!(shared.message.contains("\"alpha\", \"beta\""), "{}", shared.message);
+        // Outside every network.
+        assert_eq!(choose(&both, "192.0.2.1").err().map(|f| f.code), Some(HEELER_ET_ERR_UNRESOLVED));
+        assert_eq!(choose(&both, "nobody").err().map(|f| f.code), Some(HEELER_ET_ERR_UNRESOLVED));
+    }
+
+    #[test]
+    fn the_same_subnet_on_two_networks_is_decided_by_exact_peers_only() {
+        let a = candidate("alpha", Some("10.144.144.1/24"), &[("a-peer", "10.144.144.2")]);
+        let b = candidate("beta", Some("10.144.144.9/24"), &[("b-peer", "10.144.144.3")]);
+        let both = [a.clone(), b.clone()];
+        assert_eq!(choose(&both, "10.144.144.2").ok(), Some(a.id));
+        assert_eq!(choose(&both, "10.144.144.3").ok(), Some(b.id));
+        // A peer of each at the same address, or an address only the
+        // subnets share: never guessed.
+        let twin = candidate("beta", Some("10.144.144.9/24"), &[("b-peer", "10.144.144.2")]);
+        assert_eq!(choose(&[a.clone(), twin], "10.144.144.2").err().map(|f| f.code), Some(HEELER_ET_ERR_AMBIGUOUS));
+        assert_eq!(choose(&both, "10.144.144.50").err().map(|f| f.code), Some(HEELER_ET_ERR_AMBIGUOUS));
+        // A network that has no address yet only matches exact peers.
+        let pending = candidate("gamma", None, &[]);
+        assert_eq!(choose(&[a.clone(), pending], "10.144.144.50").ok(), Some(a.id));
+        assert!(in_subnet("10.144.144.200".parse().expect("ip"), ("10.144.144.1".parse().expect("ip"), 24)));
+        assert!(!in_subnet("10.144.145.1".parse().expect("ip"), ("10.144.144.1".parse().expect("ip"), 24)));
+        assert!(in_subnet("10.1.2.3".parse().expect("ip"), ("192.168.0.1".parse().expect("ip"), 0)));
+        assert!(!in_subnet("10.144.144.3".parse().expect("ip"), ("10.144.144.2".parse().expect("ip"), 32)));
+    }
+
     #[tokio::test]
-    async fn a_second_network_is_refused_and_reported_as_failed() {
+    async fn refused_networks_are_reported_as_failed_until_deleted() {
         let state = Arc::new(WebState::new(Uuid::new_v4(), "phone".to_owned()));
-        let running = Uuid::new_v4();
-        *lock(&state.owned) = Some((running, network()));
         let backend = Backend(state.clone());
-        let other = Uuid::new_v4();
+        let refused = Uuid::new_v4();
         let mut config = network();
-        config.network_name = Some("other".to_owned());
+        config.network_name = Some("open".to_owned());
+        config.disable_encryption = Some(true);
         let result = backend
             .run_network_instance(
                 BaseController::default(),
                 RunNetworkInstanceRequest {
-                    inst_id: Some(other.into()),
+                    inst_id: Some(refused.into()),
                     config: Some(config),
                     overwrite: false,
                     source: ConfigSource::Web as i32,
@@ -895,25 +1147,18 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
-        assert_eq!(backend.failed_instance_ids(), vec![other]);
-        assert_eq!(lock(&state.failures)[&other].network_name, "other");
-        // The running network's configuration is echoed back verbatim.
-        let echoed = backend
-            .get_network_instance_config(
-                BaseController::default(),
-                GetNetworkInstanceConfigRequest { inst_id: Some(running.into()) },
-            )
-            .await
-            .expect("echoed");
-        assert_eq!(echoed.config, Some(network()));
-        // Deleting the refused network clears its failure.
+        assert_eq!(backend.failed_instance_ids(), vec![refused]);
+        assert_eq!(lock(&state.failures)[&refused].network_name, "open");
+        assert!(state.ids().is_empty());
         backend
             .delete_network_instance(
                 BaseController::default(),
-                DeleteNetworkInstanceRequest { inst_ids: vec![other.into()] },
+                DeleteNetworkInstanceRequest { inst_ids: vec![refused.into()] },
             )
             .await
             .expect("deleted");
         assert!(backend.failed_instance_ids().is_empty());
+        let config = ConfigRpc::get_config(&backend, BaseController::default(), GetConfigRequest::default()).await;
+        assert!(config.is_err(), "no network runs");
     }
 }

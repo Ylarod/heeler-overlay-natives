@@ -17,7 +17,8 @@
 // - the device registers under its machine ID and hostname;
 // - a network with the console's default listeners runs with them dropped,
 //   and a dial through it reads the peer's banner;
-// - a second network is refused and reported as failed;
+// - a second network with the same name is refused and reported as failed
+//   (examples/multi runs two different networks from one server);
 // - config patches and other management RPCs are refused;
 // - the device reconnects after its session restarts and gets its network
 //   back; deleting the network in the console stops it.
@@ -48,6 +49,7 @@ const NETWORK_ID: &str = "11111111-2222-3333-4444-555555555555";
 const OTHER_ID: &str = "99999999-2222-3333-4444-555555555555";
 /// md5("user"): the console sends the MD5 of the password.
 const USER_PASSWORD: &str = "ee11cbb19052e40b07aac0ca060c23ee";
+const KEY: &std::ffi::CStr = c"webconfig";
 
 struct Server {
     child: Child,
@@ -184,7 +186,7 @@ fn network(id: &str, name: &str, listeners: &[&str]) -> Value {
 
 fn status() -> Value {
     let mut buf = vec![0 as c_char; 16384];
-    let n = unsafe { heeler_et_status_json(buf.as_mut_ptr(), buf.len()) };
+    let n = unsafe { heeler_et_status_json(KEY.as_ptr(), buf.as_mut_ptr(), buf.len()) };
     assert!(n >= 0 && (n as usize) < buf.len(), "status_json returned {n}");
     serde_json::from_str(&unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy()).expect("status JSON")
 }
@@ -198,14 +200,14 @@ fn web_start_with(url: &str, secure: bool) -> (c_int, String) {
     let machine = CString::new(MACHINE_ID).expect("id");
     let host = CString::new("heeler-webconfig").expect("hostname");
     let mut err = vec![0 as c_char; 512];
-    let rc = unsafe { heeler_et_web_start(url.as_ptr(), machine.as_ptr(), host.as_ptr(), c_int::from(secure), err.as_mut_ptr(), err.len()) };
+    let rc = unsafe { heeler_et_web_start(KEY.as_ptr(), url.as_ptr(), machine.as_ptr(), host.as_ptr(), c_int::from(secure), err.as_mut_ptr(), err.len()) };
     (rc, unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned())
 }
 
 fn dial_banner() -> Vec<u8> {
     let host = CString::new("10.144.150.2").expect("host");
     let mut err = vec![0 as c_char; 512];
-    let fd = unsafe { heeler_et_tcp_connect_fd(host.as_ptr(), 22, 5000, err.as_mut_ptr(), err.len()) };
+    let fd = unsafe { heeler_et_tcp_connect_fd(KEY.as_ptr(), std::ptr::null(), host.as_ptr(), 22, 5000, err.as_mut_ptr(), err.len()) };
     assert!(fd >= 0, "dial failed: {}", unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy());
     let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
     stream.set_nonblocking(false).expect("blocking");
@@ -231,12 +233,22 @@ fn web(key: &str) -> Value {
     status()["web"][key].clone()
 }
 
+/// The session's networks.
+fn networks() -> Vec<Value> {
+    web("networks").as_array().cloned().unwrap_or_default()
+}
+
 /// Running with its address and a route to the peer.
 fn online() -> bool {
     let s = status();
     s["running"] == json!(true)
-        && s["ipv4"] == json!("10.144.150.9")
-        && s["peers"].as_array().is_some_and(|peers| peers.iter().any(|peer| peer["ipv4"] == json!("10.144.150.2")))
+        && networks().iter().any(|network| {
+            network["ipv4"] == json!("10.144.150.9")
+                && network["ipv4_prefix"] == json!(24)
+                && network["peers"]
+                    .as_array()
+                    .is_some_and(|peers| peers.iter().any(|peer| peer["ipv4"] == json!("10.144.150.2")))
+        })
 }
 
 fn exercise(binary: &str, protocol: &str, config_port: u16, api: u16, secure: bool) {
@@ -263,15 +275,16 @@ fn exercise(binary: &str, protocol: &str, config_port: u16, api: u16, secure: bo
     ));
     assert_eq!(code, 200, "run: {body}");
     wait("network online", Duration::from_secs(30), online);
-    assert_eq!(web("instance_id"), json!(NETWORK_ID));
-    assert_eq!(web("network_name"), json!("heeler-web"));
+    assert_eq!(networks().len(), 1);
+    assert_eq!(networks()[0]["instance_id"], json!(NETWORK_ID));
+    assert_eq!(networks()[0]["network_name"], json!("heeler-web"));
     assert_eq!(dial_banner(), BANNER);
     eprintln!("  ok: dial read the peer's banner");
 
-    // A second network is refused and reported as failed.
-    let (code, body) = console.run_network(network(OTHER_ID, "other", &[]));
-    assert_ne!(code, 200, "a second network ran: {body}");
-    assert!(body.contains("one EasyTier network per device"), "{body}");
+    // A second network of the same name is refused and reported as failed.
+    let (code, body) = console.run_network(network(OTHER_ID, "heeler-web", &[]));
+    assert_ne!(code, 200, "a second network of the same name ran: {body}");
+    assert!(body.contains("already runs an EasyTier network named"), "{body}");
     let failures = web("failures");
     assert_eq!(failures[0]["instance_id"], json!(OTHER_ID), "{failures}");
     assert!(online());
@@ -303,7 +316,7 @@ fn exercise(binary: &str, protocol: &str, config_port: u16, api: u16, secure: bo
     assert!(body.contains("heeler-webconfig") && !body.contains("interface_ipv4s"), "{body}");
 
     // A new session gets its network back from the server.
-    heeler_et_web_stop();
+    unsafe { heeler_et_web_stop(KEY.as_ptr()) };
     assert_eq!(status(), json!({ "running": false }));
     let (rc, err) = web_start_with(&url, secure);
     assert_eq!(rc, 0, "web_start: {err}");
@@ -315,9 +328,9 @@ fn exercise(binary: &str, protocol: &str, config_port: u16, api: u16, secure: bo
     assert_eq!(code, 200);
     wait("network stopped by the console", Duration::from_secs(10), || {
         let s = status();
-        s["running"] == json!(false) && s["web"]["instance_id"].is_null()
+        s["running"] == json!(false) && s["web"]["networks"] == json!([])
     });
-    heeler_et_web_stop();
+    unsafe { heeler_et_web_stop(KEY.as_ptr()) };
     drop(server);
 }
 
@@ -445,7 +458,7 @@ no_tun = true
     assert!(!alert.contains("completed"), "handshakes: {alert}");
     assert_eq!(web("connected"), json!(false));
     eprintln!("  ok: the device refused the certificate ({alert})");
-    heeler_et_web_stop();
+    unsafe { heeler_et_web_stop(KEY.as_ptr()) };
 
     // Unsupported transports are refused before anything starts.
     let (rc, err) = web_start("ws://example.invalid/user");
@@ -455,7 +468,7 @@ no_tun = true
     assert!(err.contains("udp://, tcp://, ws:// or wss://"), "{err}");
     let (rc, _) = web_start("quic://127.0.0.1:1/user");
     assert_ne!(rc, 0);
-    heeler_et_stop();
+    unsafe { heeler_et_stop(KEY.as_ptr()) };
 
     // A server without encryption: required, the token never leaves in the
     // clear and the device keeps retrying; not required, it does.
@@ -466,7 +479,7 @@ no_tun = true
         let (rc, err) = web_start_with(&format!("tcp://127.0.0.1:{port}/{TOKEN}"), secure);
         assert_eq!(rc, 0, "web_start: {err}");
         let (connections, leaked) = rt.block_on(probe).expect("probe");
-        heeler_et_web_stop();
+        unsafe { heeler_et_web_stop(KEY.as_ptr()) };
         if secure {
             assert!(!leaked, "the token was sent in clear text");
             assert!(connections >= 2, "the device did not retry: {connections} connection(s)");

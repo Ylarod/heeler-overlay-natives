@@ -15,6 +15,11 @@
  * and add it to the running node beside ZeroTier's own planet; the node is
  * patched (NativeSupport/zerotier-patches) to route each peer through the
  * root set that knows it. zts_moon_deorbit removes such a moon.
+ *
+ * Two joined networks can assign the node the same address, so a socket's
+ * source address alone does not name its network: heeler_zt_bind_network
+ * binds a socket to one network's interface, and heeler_zt_network_reaches
+ * tells beforehand whether that network has a route to the destination.
  */
 #ifndef HEELER_ZEROTIER_H
 #define HEELER_ZEROTIER_H
@@ -86,6 +91,30 @@ int heeler_zt_planet_inspect(const void *planet, unsigned int length, heeler_zt_
  * or a moon the node already has under that ID, or ZTS_ERR_SERVICE when the
  * node is not running. Remove the moon with zts_moon_deorbit(moon_id). */
 int heeler_zt_add_moon(const void *planet, unsigned int length, uint64_t moon_id);
+
+/* Binds socket `fd` to network `net_id`'s interface for `family`
+ * (ZTS_AF_INET or ZTS_AF_INET6), as SO_BINDTODEVICE does: its packets leave
+ * through that network alone and only that network's packets reach it, even
+ * when another joined network assigned this node the same address. A bound
+ * socket bypasses lwIP's routing, so a destination the network cannot reach
+ * goes unanswered; check it first with heeler_zt_network_reaches. Returns
+ * ZTS_ERR_OK, ZTS_ERR_ARG, ZTS_ERR_NO_RESULT when the network is not joined
+ * or has no interface for `family` yet, ZTS_ERR_SERVICE when the node is not
+ * running, or ZTS_ERR_SOCKET when the socket refuses the binding. */
+int heeler_zt_bind_network(int fd, uint64_t net_id, int family);
+
+/* The network has no route to the destination (heeler_zt_network_reaches). */
+#define HEELER_ZT_ERR_NO_ROUTE (-110)
+
+/* Whether network `net_id` reaches `address` by itself: 4 bytes for
+ * ZTS_AF_INET, 16 for ZTS_AF_INET6, in network byte order. An IPv4 address
+ * is reached when it is on the network's subnet or covered by one of the
+ * network's managed routes whose gateway is on that subnet; IPv6 is not
+ * checked (any joined network with an IPv6 interface reaches it). Returns
+ * ZTS_ERR_OK, HEELER_ZT_ERR_NO_ROUTE, ZTS_ERR_ARG, ZTS_ERR_NO_RESULT when
+ * the network is not joined or its interface for `family` is not up with an
+ * address yet, or ZTS_ERR_SERVICE when the node is not running. */
+int heeler_zt_network_reaches(uint64_t net_id, int family, const void *address);
 
 #ifdef __cplusplus
 }

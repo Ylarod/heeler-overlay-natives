@@ -199,16 +199,20 @@ easytier_link_probe() {
 #include "heeler_easytier.h"
 int main(int argc, char **argv) {
     char err[64];
+    if (argc > 6) {
+        heeler_et_stop_all();
+        return 0;
+    }
     if (argc > 5) {
-        heeler_et_stop();
-        heeler_et_status_json(err, sizeof err);
-        return heeler_et_tcp_connect_fd(argv[1], 22, 1, err, sizeof err);
+        heeler_et_stop(argv[1]);
+        heeler_et_status_json(argv[1], err, sizeof err);
+        return heeler_et_tcp_connect_fd(argv[1], argv[2], argv[3], 22, 1, err, sizeof err);
     }
     if (argc > 3) {
-        heeler_et_web_stop();
-        return heeler_et_web_start(argv[1], argv[2], argv[3], 1, err, sizeof err);
+        heeler_et_web_stop(argv[1]);
+        return heeler_et_web_start(argv[1], argv[2], argv[3], argv[4], 1, err, sizeof err);
     }
-    return heeler_et_start(argv[0], 1000, err, sizeof err);
+    return heeler_et_start(argv[0], argv[0], 1000, err, sizeof err);
 }
 EOF
     xcrun --sdk "${sdk}" clang -target "${target}" -O2 -I "${crate}/include" \

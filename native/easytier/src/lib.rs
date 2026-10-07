@@ -1,4 +1,4 @@
-// heeler-easytier: one in-process, TUN-less EasyTier node behind a C ABI.
+// heeler-easytier: in-process, TUN-less EasyTier nodes behind a C ABI.
 //
 // Copyright (C) 2026 Heeler contributors
 // SPDX-License-Identifier: LGPL-3.0-or-later
@@ -8,14 +8,20 @@
 // Public License as published by the Free Software Foundation, either version 3
 // of the License, or (at your option) any later version.
 //
-// EasyTier keeps process-wide state for its instance, so this library runs at
-// most one network at a time: starting a different configuration stops the
-// previous one first. The network comes either from a TOML configuration
-// (heeler_et_start) or from an EasyTier config server (heeler_et_web_start, see
-// web.rs); starting one mode ends the other. Every exported function blocks the
-// calling thread and must not be called from inside a Tokio runtime.
+// The process runs any number of networks side by side, each under an
+// instance key the caller chooses (Heeler uses the Overlay Network's UUID).
+// A key holds either one network from a TOML configuration (heeler_et_start)
+// or one EasyTier config-server session (heeler_et_web_start, see web.rs),
+// which runs up to MAX_WEB_NETWORKS networks the server assigns; starting one
+// under a key replaces whatever the key held. Every network is its own
+// EasyTier instance — its own peers, routes, and smoltcp stack — on one shared
+// Tokio runtime, and a dial goes through exactly one of them: the key's
+// network, or the config-server network the dial names or the destination
+// selects (web::select). Nothing resolves or routes across keys. Every
+// exported function blocks the calling thread and must not be called from
+// inside a Tokio runtime.
 //
-// The node only dials out. heeler_et_start forces the flags and rejects the
+// Every node only dials out. heeler_et_start forces the flags and rejects the
 // configuration that would let peers reach through it: no TUN, no exit-node
 // service, no relaying of other peers' data, RPC or foreign networks, private
 // mode, no public-IPv6 provider, broadcast relay, magic DNS or UPnP, and no
@@ -23,7 +29,10 @@
 
 mod web;
 
+pub use web::MAX_WEB_NETWORKS;
+
 use std::{
+    collections::HashMap,
     ffi::{CStr, c_char, c_int},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     os::fd::{AsRawFd, IntoRawFd},
@@ -47,35 +56,42 @@ pub const HEELER_ET_ERR_TIMEOUT: c_int = -2;
 /// No network is running.
 pub const HEELER_ET_ERR_NOT_RUNNING: c_int = -3;
 /// The host is neither an IPv4 literal nor a peer hostname on the network,
-/// or the hostname names more than one peer.
+/// the hostname names more than one peer, or the named network does not run.
 pub const HEELER_ET_ERR_UNRESOLVED: c_int = -4;
+/// Several of a config-server session's networks fit the destination and the
+/// dial did not name one.
+pub const HEELER_ET_ERR_AMBIGUOUS: c_int = -5;
+
+/// How many instance keys may hold a network or session at once.
+pub const MAX_INSTANCES: usize = 32;
+/// The longest instance key, in bytes.
+const MAX_KEY_LEN: usize = 128;
 
 /// How long stopping a replaced or stopped network may take before it is
 /// abandoned (its tasks are cancelled when the last reference drops).
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Who started the running network.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Owner {
-    /// heeler_et_start, from the caller's TOML.
-    Manual,
-    /// A config server, through the web session.
-    Web,
-}
-
+/// A network started from the caller's TOML.
 struct Running {
     instance: Arc<NativeCoreInstance>,
-    /// The caller's TOML verbatim (so an identical start is a no-op), or the
-    /// checked TOML a config server's network became.
+    /// The caller's TOML verbatim, so an identical start is a no-op.
     toml: String,
-    owner: Owner,
+    network_name: String,
+}
+
+/// What one instance key holds.
+enum Slot {
+    Manual(Running),
+    Web(web::Session),
 }
 
 static RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
-/// Serializes start, stop, and the web session's start and stop. Dials never
-/// take it, and neither do the web session's RPC handlers.
-static LIFECYCLE: Mutex<()> = Mutex::new(());
-static CURRENT: Mutex<Option<Running>> = Mutex::new(None);
+/// Every key's network or session. Held only to read or swap an entry, never
+/// across a start, stop, or dial.
+static SLOTS: Mutex<Option<HashMap<String, Slot>>> = Mutex::new(None);
+/// One lock per key that serializes that key's start and stop (and the web
+/// session's start and stop); other keys and dials never wait for it.
+static KEY_LOCKS: Mutex<Option<HashMap<String, Arc<Mutex<()>>>>> = Mutex::new(None);
 
 #[derive(Debug)]
 struct Failure {
@@ -123,8 +139,44 @@ fn runtime() -> Result<&'static Runtime, Failure> {
         .map_err(|message| Failure::generic(message.clone()))
 }
 
-fn current_instance() -> Option<Arc<NativeCoreInstance>> {
-    lock(&CURRENT).as_ref().map(|running| running.instance.clone())
+fn with_slots<T>(body: impl FnOnce(&mut HashMap<String, Slot>) -> T) -> T {
+    let mut slots = lock(&SLOTS);
+    body(slots.get_or_insert_with(HashMap::new))
+}
+
+/// The lock that serializes `key`'s lifecycle.
+fn key_lock(key: &str) -> Arc<Mutex<()>> {
+    let mut locks = lock(&KEY_LOCKS);
+    locks.get_or_insert_with(HashMap::new).entry(key.to_owned()).or_default().clone()
+}
+
+/// An instance key: 1 to MAX_KEY_LEN bytes of printable text.
+fn check_key(key: &str) -> Result<&str, Failure> {
+    if key.is_empty() || key.len() > MAX_KEY_LEN || key.chars().any(char::is_control) {
+        return Err(Failure::generic(format!(
+            "the instance key must be 1 to {MAX_KEY_LEN} bytes of printable text"
+        )));
+    }
+    Ok(key)
+}
+
+/// Fails when `key` is new and MAX_INSTANCES keys already hold something.
+fn check_capacity(key: &str) -> Result<(), Failure> {
+    with_slots(|slots| {
+        if !slots.contains_key(key) && slots.len() >= MAX_INSTANCES {
+            Err(Failure::generic(format!("at most {MAX_INSTANCES} EasyTier networks run at once")))
+        } else {
+            Ok(())
+        }
+    })
+}
+
+/// Stops whatever a removed slot held.
+fn stop_slot(rt: &Runtime, slot: Slot) {
+    match slot {
+        Slot::Manual(running) => rt.block_on(async move { stop_bounded(&running.instance).await }),
+        Slot::Web(session) => web::shutdown(rt, session),
+    }
 }
 
 /// Copies `message` into the caller's buffer as a NUL-terminated string,
@@ -289,57 +341,77 @@ async fn stop_bounded(instance: &Arc<NativeCoreInstance>) {
     let _ = tokio::time::timeout(STOP_TIMEOUT, instance.stop()).await;
 }
 
-fn start(toml: &str, timeout_ms: u32) -> Result<c_int, Failure> {
+/// Creates and starts one instance from a checked configuration, waiting at
+/// most `timeout` for EasyTier to start it.
+async fn start_instance(config: TomlConfigLoader, timeout: Duration) -> Result<Arc<NativeCoreInstance>, Failure> {
+    let instance = create_native_instance(config)?;
+    match tokio::time::timeout(timeout, instance.start()).await {
+        Ok(Ok(())) => Ok(instance),
+        Ok(Err(error)) => {
+            stop_bounded(&instance).await;
+            Err(Failure::from(error))
+        }
+        Err(_) => {
+            stop_bounded(&instance).await;
+            Err(Failure::new(HEELER_ET_ERR_TIMEOUT, format!("EasyTier did not start within {timeout:?}")))
+        }
+    }
+}
+
+fn start(key: &str, toml: &str, timeout_ms: u32) -> Result<c_int, Failure> {
     let rt = runtime()?;
-    // Rejected before anything stops: a bad configuration leaves the running
+    let key = check_key(key)?;
+    // Rejected before anything stops: a bad configuration leaves the key's
     // network as it was.
     let config = outbound_only_config(toml)?;
-    let _lifecycle = lock(&LIFECYCLE);
-    // A manual network replaces a config server's session and its network.
-    web::shutdown(rt);
-
-    let previous = {
-        let mut current = lock(&CURRENT);
-        match current.as_ref() {
-            Some(running)
-                if running.owner == Owner::Manual && running.toml == toml && is_live(&running.instance) =>
-            {
-                return Ok(HEELER_ET_OK);
-            }
-            _ => current.take(),
-        }
-    };
+    let network_name = config.get_network_identity().network_name;
+    let key_lock = key_lock(key);
+    let _lifecycle = lock(&key_lock);
+    let unchanged = with_slots(|slots| {
+        matches!(slots.get(key), Some(Slot::Manual(running)) if running.toml == toml && is_live(&running.instance))
+    });
+    if unchanged {
+        return Ok(HEELER_ET_OK);
+    }
+    check_capacity(key)?;
+    // A new configuration replaces the key's network or config-server
+    // session; other keys are untouched.
+    if let Some(previous) = with_slots(|slots| slots.remove(key)) {
+        stop_slot(rt, previous);
+    }
     let timeout = Duration::from_millis(u64::from(timeout_ms.max(1)));
     // EasyTier constructs and tears down its instance inside a Tokio context.
-    let instance = rt.block_on(async {
-        if let Some(previous) = previous {
-            stop_bounded(&previous.instance).await;
-        }
-        let instance = create_native_instance(config)?;
-        match tokio::time::timeout(timeout, instance.start()).await {
-            Ok(result) => result.map_err(Failure::from)?,
-            Err(_) => {
-                stop_bounded(&instance).await;
-                return Err(Failure::new(
-                    HEELER_ET_ERR_TIMEOUT,
-                    format!("EasyTier did not start within {timeout:?}"),
-                ));
-            }
-        }
-        Ok(instance)
-    })?;
-    *lock(&CURRENT) = Some(Running { instance, toml: toml.to_owned(), owner: Owner::Manual });
+    let instance = rt.block_on(start_instance(config, timeout))?;
+    with_slots(|slots| {
+        slots.insert(key.to_owned(), Slot::Manual(Running { instance, toml: toml.to_owned(), network_name }))
+    });
     Ok(HEELER_ET_OK)
 }
 
-fn stop() {
+/// Stops what `key` holds; with `web_only`, only a config-server session.
+fn stop(key: &str, web_only: bool) {
     let Ok(rt) = runtime() else { return };
-    let _lifecycle = lock(&LIFECYCLE);
-    web::shutdown(rt);
-    let previous = lock(&CURRENT).take();
-    if let Some(previous) = previous {
-        rt.block_on(async move { stop_bounded(&previous.instance).await });
+    let key_lock = key_lock(key);
+    let _lifecycle = lock(&key_lock);
+    let removed = with_slots(|slots| match slots.get(key) {
+        Some(Slot::Manual(_)) if web_only => None,
+        Some(_) => slots.remove(key),
+        None => None,
+    });
+    if let Some(slot) = removed {
+        stop_slot(rt, slot);
     }
+}
+
+/// Stops every key's network and session, concurrently. A key started
+/// meanwhile is left running: the caller asked for the keys that existed.
+fn stop_all() {
+    let keys = with_slots(|slots| slots.keys().cloned().collect::<Vec<_>>());
+    std::thread::scope(|scope| {
+        for key in &keys {
+            scope.spawn(move || stop(key, false));
+        }
+    });
 }
 
 /// Matches a peer by its EasyTier hostname, case-insensitively; a trailing
@@ -389,16 +461,23 @@ async fn resolve(instance: &NativeCoreInstance, host: &str) -> Result<Ipv4Addr, 
     if let Ok(address) = host.parse::<Ipv4Addr>() {
         return Ok(address);
     }
-    let peers = instance
+    resolve_hostname(host, &peer_addresses(instance).await)
+}
+
+/// The hostname and virtual address of every other node in the instance's
+/// own route table.
+async fn peer_addresses(instance: &NativeCoreInstance) -> Vec<(String, Option<Ipv4Addr>)> {
+    let my_peer_id = instance.node_snapshot().await.peer_id;
+    instance
         .route_snapshots()
         .await
         .into_iter()
+        .filter(|route| route.peer_id != my_peer_id)
         .map(|route| {
             let address = route.ipv4_addr.and_then(|inet| inet.address).map(Ipv4Addr::from);
             (route.hostname, address)
         })
-        .collect::<Vec<_>>();
-    resolve_hostname(host, &peers)
+        .collect()
 }
 
 fn set_nosigpipe(fd: c_int) -> std::io::Result<()> {
@@ -416,14 +495,51 @@ fn set_nosigpipe(fd: c_int) -> std::io::Result<()> {
     if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 
-fn tcp_connect(host: &str, port: u16, timeout_ms: u32) -> Result<c_int, Failure> {
+/// What a dial goes through: a manual network, or a session whose network
+/// is chosen per dial.
+enum DialSource {
+    Manual { instance: Arc<NativeCoreInstance>, network_name: String },
+    Web(Arc<web::WebState>),
+}
+
+fn not_running() -> Failure {
+    Failure::new(HEELER_ET_ERR_NOT_RUNNING, "EasyTier is not running")
+}
+
+fn tcp_connect(key: &str, network: Option<&str>, host: &str, port: u16, timeout_ms: u32) -> Result<c_int, Failure> {
     let rt = runtime()?;
-    let instance = current_instance()
-        .filter(|instance| is_live(instance))
-        .ok_or_else(|| Failure::new(HEELER_ET_ERR_NOT_RUNNING, "EasyTier is not running"))?;
+    let source = with_slots(|slots| match slots.get(key) {
+        Some(Slot::Manual(running)) => Some(DialSource::Manual {
+            instance: running.instance.clone(),
+            network_name: running.network_name.clone(),
+        }),
+        Some(Slot::Web(session)) => Some(DialSource::Web(session.state())),
+        None => None,
+    })
+    .ok_or_else(not_running)?;
     let timeout = Duration::from_millis(u64::from(timeout_ms));
 
     rt.block_on(async move {
+        // Exactly one instance carries the stream: the key's own network, or
+        // one of its session's networks. Hostnames resolve in that
+        // instance's route table only.
+        let instance = match source {
+            DialSource::Manual { instance, network_name } => {
+                if let Some(wanted) = network
+                    && wanted != network_name
+                {
+                    return Err(Failure::new(
+                        HEELER_ET_ERR_UNRESOLVED,
+                        format!("this key runs EasyTier network \"{network_name}\", not \"{wanted}\""),
+                    ));
+                }
+                instance
+            }
+            DialSource::Web(state) => web::select(&state, network, host).await?,
+        };
+        if !is_live(&instance) {
+            return Err(not_running());
+        }
         let address = resolve(&instance, host).await?;
         let destination = SocketAddr::V4(SocketAddrV4::new(address, port));
         let stream = instance
@@ -541,55 +657,76 @@ async fn peer_statuses(instance: &NativeCoreInstance, my_peer_id: u32) -> Vec<Pe
     peers
 }
 
-fn status_json() -> String {
-    // Any EasyTier handle released here is released inside the runtime context.
-    let _context = runtime().ok().map(Runtime::enter);
-    let web = web::status();
-    let current = lock(&CURRENT).as_ref().map(|running| (running.instance.clone(), running.owner));
-    let Some((instance, owner)) = current else {
-        return match web {
-            Some(web) => serde_json::json!({ "mode": "web", "running": false, "web": web }),
-            None => serde_json::json!({ "running": false }),
-        }
-        .to_string();
+/// One instance's status fields: `running`, `ipv4`, `ipv4_prefix`,
+/// `hostname`, `peer_count`, `peers`, `error`. Runs inside the runtime.
+async fn instance_status(instance: &NativeCoreInstance) -> serde_json::Map<String, serde_json::Value> {
+    let (ipv4, prefix, hostname, peers) = if instance.is_ready() {
+        let node = instance.node_snapshot().await;
+        let peers = peer_statuses(instance, node.peer_id).await;
+        (
+            node.ipv4_addr.map(|inet| inet.address().to_string()),
+            node.ipv4_addr.map(|inet| inet.network_length()),
+            node.hostname,
+            peers,
+        )
+    } else {
+        (None, None, String::new(), Vec::new())
     };
-    let running = is_live(&instance);
-    let error = instance.latest_error();
-    let (ipv4, hostname, peers) = match runtime() {
-        Ok(rt) if instance.is_ready() => rt.block_on(async {
-            let node = instance.node_snapshot().await;
-            let peers = peer_statuses(&instance, node.peer_id).await;
-            (node.ipv4_addr.map(|inet| inet.address().to_string()), node.hostname, peers)
-        }),
-        _ => (None, String::new(), Vec::new()),
-    };
-    let mut json = serde_json::json!({
-        "mode": match owner { Owner::Manual => "manual", Owner::Web => "web" },
-        "running": running,
+    let json = serde_json::json!({
+        "running": is_live(instance),
         "ipv4": ipv4,
+        "ipv4_prefix": prefix,
         "hostname": hostname,
         "peer_count": peers.len(),
         "peers": peers.iter().map(PeerStatus::json).collect::<Vec<_>>(),
-        "error": error,
+        "error": instance.latest_error(),
     });
-    if let Some(web) = web {
-        json["web"] = web;
+    match json {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
     }
-    json.to_string()
 }
 
-/// Starts the process's EasyTier network from `toml` under the outbound-only
-/// policy, waiting at most `timeout_ms` for EasyTier to start (joining the
-/// network and getting an address happen afterwards; poll the status).
-/// Starting the configuration that is already running is a no-op; a different
-/// one stops the running network first. A configuration that does not parse or
-/// breaks the policy leaves the running network as it was; any later failure
-/// leaves none.
+fn status_json(key: &str) -> String {
+    let not_running = || serde_json::json!({ "running": false }).to_string();
+    let Ok(rt) = runtime() else { return not_running() };
+    enum Source {
+        Manual(Arc<NativeCoreInstance>, String),
+        Web(web::SessionView),
+    }
+    let source = with_slots(|slots| match slots.get(key) {
+        Some(Slot::Manual(running)) => Some(Source::Manual(running.instance.clone(), running.network_name.clone())),
+        Some(Slot::Web(session)) => Some(Source::Web(session.view())),
+        None => None,
+    });
+    // Any EasyTier handle released here is released inside the runtime.
+    let _context = rt.enter();
+    match source {
+        None => not_running(),
+        Some(Source::Manual(instance, network_name)) => {
+            let mut json = rt.block_on(instance_status(&instance));
+            json.insert("mode".to_owned(), "manual".into());
+            json.insert("network_name".to_owned(), network_name.into());
+            serde_json::Value::Object(json).to_string()
+        }
+        Some(Source::Web(view)) => rt.block_on(web::status(view)).to_string(),
+    }
+}
+
+/// Starts `key`'s network from `toml` under the outbound-only policy,
+/// waiting at most `timeout_ms` for EasyTier to start (joining the network
+/// and getting an address happen afterwards; poll the status). Starting the
+/// configuration the key already runs is a no-op; anything else the key held
+/// is stopped first. Other keys are never touched. A configuration that does
+/// not parse or breaks the policy leaves the key as it was; any later failure
+/// leaves it empty.
 ///
 /// # Safety
-/// `toml` is a NUL-terminated string; `err` is null or `errlen` writable bytes.
+/// `key` and `toml` are NUL-terminated strings; `err` is null or `errlen`
+/// writable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn heeler_et_start(
+    key: *const c_char,
     toml: *const c_char,
     timeout_ms: u32,
     err: *mut c_char,
@@ -597,34 +734,51 @@ pub unsafe extern "C" fn heeler_et_start(
 ) -> c_int {
     ffi_call(err, errlen, || {
         // SAFETY: forwarded from the caller.
+        let key = unsafe { borrowed_str(key, "instance key") }?;
+        // SAFETY: forwarded from the caller.
         let toml = unsafe { borrowed_str(toml, "configuration") }?;
-        start(toml, timeout_ms)
+        start(key, toml, timeout_ms)
     })
 }
 
-/// Stops the running network, if any. Dialled streams fail afterwards.
+/// Stops `key`'s network or config-server session, if any. Its dialled
+/// streams fail afterwards; other keys keep running.
+///
+/// # Safety
+/// `key` is null (a no-op) or a NUL-terminated string.
 #[unsafe(no_mangle)]
-pub extern "C" fn heeler_et_stop() {
-    let _ = catch_unwind(stop);
+pub unsafe extern "C" fn heeler_et_stop(key: *const c_char) {
+    let _ = catch_unwind(|| {
+        // SAFETY: forwarded from the caller.
+        if let Ok(key) = unsafe { borrowed_str(key, "instance key") } {
+            stop(key, false);
+        }
+    });
 }
 
-/// Starts (or keeps) the config-server session: connects to `url`
+/// Stops every key's network and session.
+#[unsafe(no_mangle)]
+pub extern "C" fn heeler_et_stop_all() {
+    let _ = catch_unwind(stop_all);
+}
+
+/// Starts (or keeps) `key`'s config-server session: connects to `url`
 /// (`udp://` or `tcp://host:port/<token>`, also `ws://` and `wss://` with a
 /// verified certificate) as the device `machine_id` (a UUID the caller keeps)
-/// named `hostname`, and runs the one network the server assigns under the
+/// named `hostname`, and runs the networks the server assigns under the
 /// outbound-only policy. With `secure_mode` non-zero the session only runs
 /// over EasyTier's encrypted web tunnel and a server that does not offer it
 /// is never used; with zero it upgrades when the server offers it and runs in
 /// clear text otherwise. Returns at once; connecting and joining happen in
-/// the background (poll the status). The same session is a no-op; anything
-/// else running — another session or a heeler_et_start network — is stopped
-/// first.
+/// the background (poll the status). The same session under the same key is
+/// a no-op; anything else the key held is stopped first.
 ///
 /// # Safety
-/// `url`, `machine_id` and `hostname` are NUL-terminated strings; `err` is null
-/// or `errlen` writable bytes.
+/// `key`, `url`, `machine_id` and `hostname` are NUL-terminated strings;
+/// `err` is null or `errlen` writable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn heeler_et_web_start(
+    key: *const c_char,
     url: *const c_char,
     machine_id: *const c_char,
     hostname: *const c_char,
@@ -634,31 +788,49 @@ pub unsafe extern "C" fn heeler_et_web_start(
 ) -> c_int {
     ffi_call(err, errlen, || {
         // SAFETY: forwarded from the caller.
+        let key = unsafe { borrowed_str(key, "instance key") }?;
+        // SAFETY: forwarded from the caller.
         let url = unsafe { borrowed_str(url, "config server URL") }?;
         // SAFETY: forwarded from the caller.
         let machine_id = unsafe { borrowed_str(machine_id, "machine ID") }?;
         // SAFETY: forwarded from the caller.
         let hostname = unsafe { borrowed_str(hostname, "hostname") }?;
-        web::start(url, machine_id, hostname, secure_mode != 0)
+        web::start(key, url, machine_id, hostname, secure_mode != 0)
     })
 }
 
-/// Ends the config-server session and stops its network, if any.
-#[unsafe(no_mangle)]
-pub extern "C" fn heeler_et_web_stop() {
-    let _ = catch_unwind(web::stop);
-}
-
-/// Connects to `host:port` through the overlay and returns one end of a
-/// connected, non-blocking AF_UNIX socketpair with SO_NOSIGPIPE set. The caller
-/// owns the descriptor; closing it ends the stream. `host` is an IPv4 literal
-/// or a peer's EasyTier hostname. Returns a negative HEELER_ET_ERR_* code on
-/// failure.
+/// Ends `key`'s config-server session and stops its networks; a manual
+/// network under `key` is left alone.
 ///
 /// # Safety
-/// `host` is a NUL-terminated string; `err` is null or `errlen` writable bytes.
+/// `key` is null (a no-op) or a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn heeler_et_web_stop(key: *const c_char) {
+    let _ = catch_unwind(|| {
+        // SAFETY: forwarded from the caller.
+        if let Ok(key) = unsafe { borrowed_str(key, "instance key") } {
+            stop(key, true);
+        }
+    });
+}
+
+/// Connects to `host:port` through one of `key`'s networks and returns one
+/// end of a connected, non-blocking AF_UNIX socketpair with SO_NOSIGPIPE set.
+/// The caller owns the descriptor; closing it ends the stream. `host` is an
+/// IPv4 literal or a peer's EasyTier hostname, resolved in that network's
+/// own route table. `network` (null or empty: unspecified) names the network
+/// by name or, for a config-server session, by instance ID; a manual key's
+/// network must match it. Without it a session picks its only network, else
+/// the one network the destination fits (see web::select). Returns a negative
+/// HEELER_ET_ERR_* code on failure.
+///
+/// # Safety
+/// `key` and `host` are NUL-terminated strings; `network` is null or one;
+/// `err` is null or `errlen` writable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn heeler_et_tcp_connect_fd(
+    key: *const c_char,
+    network: *const c_char,
     host: *const c_char,
     port: u16,
     timeout_ms: u32,
@@ -667,23 +839,33 @@ pub unsafe extern "C" fn heeler_et_tcp_connect_fd(
 ) -> c_int {
     ffi_call(err, errlen, || {
         // SAFETY: forwarded from the caller.
+        let key = unsafe { borrowed_str(key, "instance key") }?;
+        let network = if network.is_null() {
+            None
+        } else {
+            // SAFETY: forwarded from the caller.
+            Some(unsafe { borrowed_str(network, "network") }?).filter(|name| !name.is_empty())
+        };
+        // SAFETY: forwarded from the caller.
         let host = unsafe { borrowed_str(host, "host") }?;
-        tcp_connect(host, port, timeout_ms)
+        tcp_connect(key, network, host, port, timeout_ms)
     })
 }
 
-/// Writes the node status as a NUL-terminated JSON object
-/// `{"running":bool,"ipv4":string|null,"hostname":string,"peer_count":int,"peers":[...],"error":string|null}`
-/// (only `running` when no network exists). Each peer is
-/// `{"peer_id":int,"hostname":string,"ipv4":string|null,"direct":bool,"cost":int,"latency_ms":number|null}`. Returns the JSON length excluding
-/// the terminator; a result `>= len` means the buffer was too small and the
-/// output was not written. Returns -1 on failure.
+/// Writes `key`'s status as a NUL-terminated JSON object (see the header).
+/// Returns the JSON length excluding the terminator; a result `>= len` means
+/// the buffer was too small and the output was not written. Returns -1 on
+/// failure.
 ///
 /// # Safety
-/// `buf` is null or `len` writable bytes.
+/// `key` is a NUL-terminated string; `buf` is null or `len` writable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn heeler_et_status_json(buf: *mut c_char, len: usize) -> c_int {
-    let Ok(json) = catch_unwind(status_json) else { return HEELER_ET_ERR };
+pub unsafe extern "C" fn heeler_et_status_json(key: *const c_char, buf: *mut c_char, len: usize) -> c_int {
+    // SAFETY: forwarded from the caller.
+    let Ok(key) = (unsafe { borrowed_str(key, "instance key") }).and_then(check_key) else {
+        return HEELER_ET_ERR;
+    };
+    let Ok(json) = catch_unwind(|| status_json(key)) else { return HEELER_ET_ERR };
     let Ok(length) = c_int::try_from(json.len()) else { return HEELER_ET_ERR };
     if json.len() < len {
         write_c_string(&json, buf, len);
@@ -840,22 +1022,63 @@ mod tests {
 
     #[test]
     fn calls_without_a_network_fail_cleanly() {
+        let key = c"no-such-key";
         let mut err = [0 as c_char; 128];
         let host = c"10.0.0.1";
-        let fd = unsafe { heeler_et_tcp_connect_fd(host.as_ptr(), 22, 100, err.as_mut_ptr(), err.len()) };
+        let fd = unsafe {
+            heeler_et_tcp_connect_fd(key.as_ptr(), std::ptr::null(), host.as_ptr(), 22, 100, err.as_mut_ptr(), err.len())
+        };
         assert_eq!(fd, HEELER_ET_ERR_NOT_RUNNING);
         let message = unsafe { CStr::from_ptr(err.as_ptr()) };
         assert_eq!(message.to_str().ok(), Some("EasyTier is not running"));
 
         let mut buf = [0 as c_char; 64];
-        let n = unsafe { heeler_et_status_json(buf.as_mut_ptr(), buf.len()) };
+        let n = unsafe { heeler_et_status_json(key.as_ptr(), buf.as_mut_ptr(), buf.len()) };
         assert!(n > 0 && (n as usize) < buf.len());
         let json = unsafe { CStr::from_ptr(buf.as_ptr()) };
         assert_eq!(json.to_str().ok(), Some(r#"{"running":false}"#));
-        assert_eq!(unsafe { heeler_et_status_json(buf.as_mut_ptr(), 4) }, n);
+        assert_eq!(unsafe { heeler_et_status_json(key.as_ptr(), buf.as_mut_ptr(), 4) }, n);
+        assert_eq!(unsafe { heeler_et_status_json(std::ptr::null(), buf.as_mut_ptr(), buf.len()) }, HEELER_ET_ERR);
 
-        let rc = unsafe { heeler_et_start(c"not = [valid".as_ptr(), 1000, err.as_mut_ptr(), err.len()) };
+        let rc = unsafe { heeler_et_start(key.as_ptr(), c"not = [valid".as_ptr(), 1000, err.as_mut_ptr(), err.len()) };
         assert_eq!(rc, HEELER_ET_ERR);
-        heeler_et_stop();
+        unsafe { heeler_et_stop(key.as_ptr()) };
+        unsafe { heeler_et_stop(std::ptr::null()) };
+        unsafe { heeler_et_web_stop(key.as_ptr()) };
+        heeler_et_stop_all();
+    }
+
+    #[test]
+    fn the_header_matches_the_library() {
+        let header = include_str!("../include/heeler_easytier.h");
+        for (name, value) in [
+            ("HEELER_ET_OK", HEELER_ET_OK.to_string()),
+            ("HEELER_ET_ERR", format!("({HEELER_ET_ERR})")),
+            ("HEELER_ET_ERR_TIMEOUT", format!("({HEELER_ET_ERR_TIMEOUT})")),
+            ("HEELER_ET_ERR_NOT_RUNNING", format!("({HEELER_ET_ERR_NOT_RUNNING})")),
+            ("HEELER_ET_ERR_UNRESOLVED", format!("({HEELER_ET_ERR_UNRESOLVED})")),
+            ("HEELER_ET_ERR_AMBIGUOUS", format!("({HEELER_ET_ERR_AMBIGUOUS})")),
+            ("HEELER_ET_MAX_INSTANCES", MAX_INSTANCES.to_string()),
+            ("HEELER_ET_MAX_WEB_NETWORKS", web::MAX_WEB_NETWORKS.to_string()),
+        ] {
+            assert!(header.contains(&format!("#define {name} {value}\n")), "{name} is not {value}");
+        }
+    }
+
+    #[test]
+    fn instance_keys_are_short_printable_text() {
+        assert!(check_key("6A1F0E44-6C1E-4F43-9B7F-1F1F1F1F1F1F").is_ok());
+        assert!(check_key("").is_err());
+        assert!(check_key("network one").is_ok());
+        assert!(check_key("a\nb").is_err());
+        assert!(check_key("a\u{0}b").is_err());
+        assert!(check_key("tab\there").is_err());
+        assert!(check_key(&"k".repeat(MAX_KEY_LEN)).is_ok());
+        assert!(check_key(&"k".repeat(MAX_KEY_LEN + 1)).is_err());
+        let mut err = [0 as c_char; 128];
+        let rc = unsafe {
+            heeler_et_start(c"".as_ptr(), c"x = 1".as_ptr(), 1000, err.as_mut_ptr(), err.len())
+        };
+        assert_eq!(rc, HEELER_ET_ERR);
     }
 }

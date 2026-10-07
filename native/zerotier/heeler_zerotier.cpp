@@ -15,6 +15,9 @@
 #include "Node.hpp"
 #include "SHA512.hpp"
 #include "World.hpp"
+#include "VirtualTap.hpp"
+#include "lwip/netif.h"
+#include "lwip/tcpip.h"
 
 #include <algorithm>
 #include <vector>
@@ -271,4 +274,85 @@ extern "C" int heeler_zt_peers(heeler_zt_peer* peers, unsigned int capacity)
     }
     zts_service->_node->freeQueryResult(static_cast<void*>(list));
     return total > 0x7fffffffUL ? 0x7fffffff : static_cast<int>(total);
+}
+
+extern "C" int heeler_zt_bind_network(int fd, uint64_t net_id, int family)
+{
+    if (fd < 0 || net_id == 0 || (family != ZTS_AF_INET && family != ZTS_AF_INET6)) {
+        return ZTS_ERR_ARG;
+    }
+    // lwIP names a netif by its two letters and number ("4b3"); an ifreq
+    // carries the name, NUL-terminated, in its first bytes.
+    char name[16] = { 0 };
+    {
+        ACQUIRE_SERVICE(ZTS_ERR_SERVICE);
+        Mutex::Lock _ln(zts_service->_nets_m);
+        auto network = zts_service->_nets.find(net_id);
+        if (network == zts_service->_nets.end() || ! network->second.tap) {
+            return ZTS_ERR_NO_RESULT;
+        }
+        VirtualTap* tap = network->second.tap;
+        // `::netif` is lwIP's interface; ZeroTier has its own `netif`.
+        struct ::netif* n = (struct ::netif*)(family == ZTS_AF_INET ? tap->netif4 : tap->netif6);
+        if (! n) {
+            return ZTS_ERR_NO_RESULT;
+        }
+        // The same lock order as libzt's network configuration: the
+        // networks lock, then lwIP's core lock.
+        LOCK_TCPIP_CORE();
+        const bool named = netif_index_to_name(netif_get_index(n), name) != NULL;
+        UNLOCK_TCPIP_CORE();
+        if (! named) {
+            return ZTS_ERR_NO_RESULT;
+        }
+    }
+    return zts_bsd_setsockopt(fd, ZTS_SOL_SOCKET, ZTS_SO_BINDTODEVICE, name, sizeof(name)) < 0 ? ZTS_ERR_SOCKET
+                                                                                             : ZTS_ERR_OK;
+}
+
+extern "C" int heeler_zt_network_reaches(uint64_t net_id, int family, const void* address)
+{
+    if (net_id == 0 || ! address || (family != ZTS_AF_INET && family != ZTS_AF_INET6)) {
+        return ZTS_ERR_ARG;
+    }
+    ACQUIRE_SERVICE(ZTS_ERR_SERVICE);
+    Mutex::Lock _ln(zts_service->_nets_m);
+    auto network = zts_service->_nets.find(net_id);
+    if (network == zts_service->_nets.end() || ! network->second.tap) {
+        return ZTS_ERR_NO_RESULT;
+    }
+    VirtualTap* tap = network->second.tap;
+    struct ::netif* n = (struct ::netif*)(family == ZTS_AF_INET ? tap->netif4 : tap->netif6);
+    if (! n) {
+        return ZTS_ERR_NO_RESULT;
+    }
+    if (family == ZTS_AF_INET6) {
+        // lwIP holds no per-network IPv6 routes: not checked.
+        return ZTS_ERR_OK;
+    }
+    ip4_addr_t dest;
+    memcpy(&dest.addr, address, sizeof(dest.addr));
+    int result = HEELER_ZT_ERR_NO_ROUTE;
+    LOCK_TCPIP_CORE();
+    if (! netif_is_up(n) || ! netif_is_link_up(n) || ip4_addr_isany_val(*netif_ip4_addr(n))) {
+        result = ZTS_ERR_NO_RESULT;
+    }
+    else if (ip4_addr_netcmp(&dest, netif_ip4_addr(n), netif_ip4_netmask(n))) {
+        result = ZTS_ERR_OK;
+    }
+    else {
+        // The network's own managed routes through a gateway on its subnet,
+        // as lwIP's routing hook (patch 0002) uses them.
+        uint32_t via = 0;
+        unsigned int bits = 0;
+        if (tap->gatewayFor4(ip4_addr_get_u32(&dest), &via, &bits)) {
+            ip4_addr_t gateway;
+            ip4_addr_set_u32(&gateway, via);
+            if (ip4_addr_netcmp(&gateway, netif_ip4_addr(n), netif_ip4_netmask(n))) {
+                result = ZTS_ERR_OK;
+            }
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+    return result;
 }

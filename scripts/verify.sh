@@ -88,9 +88,10 @@ TAILSCALE_SYMBOLS="tailscale_new tailscale_start tailscale_close tailscale_dial
 ZEROTIER_SYMBOLS="zts_init_from_memory zts_node_start zts_node_get_id_pair zts_net_join
     zts_net_leave zts_bsd_socket zts_bsd_connect zts_bsd_poll zts_bsd_close
     zts_id_new zts_id_pair_is_valid zts_node_get_id zts_moon_orbit zts_moon_deorbit
-    heeler_zt_peers heeler_zt_planet_inspect heeler_zt_add_moon"
-EASYTIER_SYMBOLS="heeler_et_start heeler_et_stop heeler_et_tcp_connect_fd heeler_et_status_json
-    heeler_et_web_start heeler_et_web_stop"
+    zts_bsd_setsockopt heeler_zt_peers heeler_zt_planet_inspect heeler_zt_add_moon
+    heeler_zt_bind_network heeler_zt_network_reaches"
+EASYTIER_SYMBOLS="heeler_et_start heeler_et_stop heeler_et_stop_all heeler_et_tcp_connect_fd
+    heeler_et_status_json heeler_et_web_start heeler_et_web_stop"
 check_exports() {
     local framework="$1" slice="$2" symbols="$3" exported symbol
     exported="$(xcrun nm -gU "${ARTIFACTS}/${framework}.xcframework/${slice}/${framework}.framework/${framework}" 2>/dev/null || true)"
@@ -109,15 +110,19 @@ cat > "${SIGNATURES}/signatures.c" <<'EOF'
 #include <CEasyTier/CEasyTier.h>
 
 /* Each assignment fails to compile if a declaration changes its C type. */
-int (*const et_start)(const char *, uint32_t, char *, size_t) = heeler_et_start;
-void (*const et_stop)(void) = heeler_et_stop;
-int (*const et_web_start)(const char *, const char *, const char *, int, char *, size_t) = heeler_et_web_start;
-void (*const et_web_stop)(void) = heeler_et_web_stop;
-int (*const et_connect)(const char *, uint16_t, uint32_t, char *, size_t) = heeler_et_tcp_connect_fd;
-int (*const et_status)(char *, size_t) = heeler_et_status_json;
+int (*const et_start)(const char *, const char *, uint32_t, char *, size_t) = heeler_et_start;
+void (*const et_stop)(const char *) = heeler_et_stop;
+void (*const et_stop_all)(void) = heeler_et_stop_all;
+int (*const et_web_start)(const char *, const char *, const char *, const char *, int, char *, size_t) = heeler_et_web_start;
+void (*const et_web_stop)(const char *) = heeler_et_web_stop;
+int (*const et_connect)(const char *, const char *, const char *, uint16_t, uint32_t, char *, size_t) = heeler_et_tcp_connect_fd;
+int (*const et_status)(const char *, char *, size_t) = heeler_et_status_json;
+_Static_assert(HEELER_ET_ABI_VERSION == 2, "CEasyTier is not the multi-instance ABI");
 int (*const zt_peers)(heeler_zt_peer *, unsigned int) = heeler_zt_peers;
 int (*const zt_inspect)(const void *, unsigned int, heeler_zt_planet_info *) = heeler_zt_planet_inspect;
 int (*const zt_add_moon)(const void *, unsigned int, uint64_t) = heeler_zt_add_moon;
+int (*const zt_bind_network)(int, uint64_t, int) = heeler_zt_bind_network;
+int (*const zt_network_reaches)(uint64_t, int, const void *) = heeler_zt_network_reaches;
 void (*const ts_disable_log_upload)(void) = heeler_tailscale_disable_log_upload;
 int (*const ts_log_upload_state)(void) = heeler_tailscale_log_upload_state;
 int (*const ts_logout)(int, int) = heeler_tailscale_logout;
