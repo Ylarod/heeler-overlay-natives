@@ -1,0 +1,151 @@
+Heeler: rebind the UDP sockets that iOS defuncts while the app is suspended.
+
+iOS defuncts the sockets of an app it suspends. A defunct UDP socket stays
+readable, yet every recvfrom fails at once with ENOTCONN and every sendto
+with EPIPE. Heeler starts one libzt node per process and never stops it, so
+the node outlives every suspension: after the app returns, Phy::poll's
+select() reports each of the node's UDP sockets readable, recvfrom fails, the
+loop breaks, and select() returns again at once. On an iPhone this pinned a
+core (about 41,000 select() calls a second over 16 defunct sockets, each
+failing recvfrom with ENOTCONN and sendto with EPIPE) until the process
+ended; the node kept working only through sockets bound after the
+suspension.
+
+This patch:
+- has Phy::poll (Darwin) stop waiting on a UDP socket whose recvfrom fails
+  with ENOTCONN or EPIPE (FD_CLR from the read set) and record it, which
+  Phy::takeDefunctUdpSocket reports once;
+- has NodeService::run, when one was found, close every bound UDP socket
+  (Binder::closeAll) and refresh the bindings at once, which binds new
+  sockets on the same ports; at most once a second.
+
+Sends to a path whose socket was closed fall back to every bound socket, as
+after any binding refresh (Binder::isUdpSocketValid). Each changed file
+carries a "Modified by Heeler contributors" notice.
+
+Applies to libzt commit 7e5d0f99a2de81c45faa28e44289bcd19d933bf2 with patch
+0002 applied (src/NodeService.cpp) and ZeroTierOne
+fc5c3ec22090b5b2a0f274e863651fe9ca489bf4 (1.16.2) in libzt's ext/ZeroTierOne
+(osdep/Phy.hpp).
+
+--- a/ext/ZeroTierOne/osdep/Phy.hpp
++++ b/ext/ZeroTierOne/osdep/Phy.hpp
+@@ -6,6 +6,12 @@
+  * https://www.zerotier.com/
+  */
+ 
++/*
++ * Modified by Heeler contributors (2026): poll() stops waiting on a UDP socket
++ * that iOS has defuncted (receive fails with ENOTCONN, send with EPIPE) and
++ * reports it through takeDefunctUdpSocket(), so its owner can bind a new one.
++ */
++
+ #ifndef ZT_PHY_HPP
+ #define ZT_PHY_HPP
+ 
+@@ -153,6 +159,7 @@
+ 
+ 	bool _noDelay;
+ 	bool _noCheck;
++	bool _defunctUdpSocket;
+ 
+   public:
+ 	/**
+@@ -204,6 +211,7 @@
+ 		_whackSendSocket = pipes[1];
+ 		_noDelay = noDelay;
+ 		_noCheck = noCheck;
++		_defunctUdpSocket = false;
+ 	}
+ 
+ 	~Phy()
+@@ -1091,8 +1099,16 @@
+ 								catch (...) {
+ 								}
+ 							}
+-							else if (n < 0)
++							else if (n < 0) {
++#ifdef __APPLE__
++								if ((errno == ENOTCONN) || (errno == EPIPE)) {
++									// Defunct (see takeDefunctUdpSocket()): stop waiting on it.
++									FD_CLR(s->sock, &_readfds);
++									_defunctUdpSocket = true;
++								}
++#endif
+ 								break;
++							}
+ 						}
+ #endif
+ 					}
+@@ -1181,6 +1197,23 @@
+ 	}
+ 
+ 	/**
++	 * Whether poll() has found a defunct UDP socket since the last call
++	 *
++	 * iOS defuncts the sockets of an app it suspends. Such a socket stays
++	 * readable, yet every receive fails with ENOTCONN and every send with
++	 * EPIPE, so select() would return at once forever. poll() stops waiting on
++	 * it; the caller should close it and bind a new one.
++	 *
++	 * @return True once for each time one or more were found
++	 */
++	inline bool takeDefunctUdpSocket()
++	{
++		const bool found = _defunctUdpSocket;
++		_defunctUdpSocket = false;
++		return found;
++	}
++
++	/**
+ 	 * @param sock Socket to close
+ 	 * @param callHandlers If true, call handlers for TCP connect (success: false) or close (default: true)
+ 	 */
+--- a/src/NodeService.cpp
++++ b/src/NodeService.cpp
+@@ -13,7 +13,8 @@
+ 
+ /*
+  * Modified by Heeler contributors (2026): syncManagedStuff hands the network's IPv4 routes
+- * through a gateway to the tap (managed gateway routes).
++ * through a gateway to the tap (managed gateway routes); the main loop rebinds the UDP
++ * sockets when iOS has defuncted them.
+  */
+ 
+ /**
+@@ -401,6 +402,7 @@
+         int64_t lastBindRefresh = 0;
+         int64_t lastCleanedPeersDb = 0;
+         int64_t lastOnline = clockShouldBe;
++        int64_t lastDefunctRebind = 0;
+         for (;;) {
+             _run_m.lock();
+             if (! _run) {
+@@ -422,6 +424,18 @@
+             if ((now > clockShouldBe) && ((now - clockShouldBe) > 10000)) {
+                 _lastRestart = now;
+                 restarted = true;
++            }
++
++            // Heeler: iOS defuncts the sockets of an app it suspends, and this
++            // node outlives the suspension. Phy stops waiting on a defunct UDP
++            // socket (each receive would fail at once, forever); close every
++            // UDP socket and bind new ones on the same ports, at most once a
++            // second.
++            bool rebindDefunct = false;
++            if (((now - lastDefunctRebind) >= 1000) && _phy.takeDefunctUdpSocket()) {
++                lastDefunctRebind = now;
++                _binder.closeAll(_phy);
++                rebindDefunct = true;
+             }
+ 
+             // Refresh bindings in case device's interfaces have changed,
+@@ -429,7 +443,7 @@
+             // default)
+             if (((now - lastBindRefresh)
+                  >= (_node->bondController()->inUse() ? ZT_BINDER_REFRESH_PERIOD / 4 : ZT_BINDER_REFRESH_PERIOD))
+-                || (restarted)) {
++                || (restarted) || (rebindDefunct)) {
+                 // If secondary port is not configured to a constant value and we've been offline for a while,
+                 // bind a new secondary port. This is a workaround for a "coma" issue caused by buggy NATs that stop
+                 // working on one port after a while.
