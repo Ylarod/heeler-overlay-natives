@@ -5,6 +5,16 @@ TAILSCALE_GO_FILE="native/tailscale/heeler_tailscale.go"
 TAILSCALE_GO_MOD="native/tailscale/go.mod"
 TAILSCALE_GO_SUM="native/tailscale/go.sum"
 
+# go_mod_requires <go.mod> <module> <version>: the go.mod requires exactly
+# that version, on a `require` line or inside a `require (...)` block.
+go_mod_requires() {
+    awk -v module="$2" -v version="$3" '
+        ($1 == module && $2 == version && (NF == 2 || $3 == "//")) ||
+        ($1 == "require" && $2 == module && $3 == version && NF == 3) { found = 1 }
+        END { exit !found }
+    ' "$1"
+}
+
 tailscale_fingerprint() {
     echo "library: tailscale"
     echo "deployment-target: ${DEPLOYMENT_TARGET}"
@@ -38,13 +48,9 @@ build_tailscale() {
     # go.mod and go.sum replace them, and -mod=readonly refuses any change.
     verify_file go.mod "${ROOT_DIR}/${TAILSCALE_GO_MOD}" "${LIBTAILSCALE_GO_MOD_SHA256}"
     verify_file go.sum "${ROOT_DIR}/${TAILSCALE_GO_SUM}" "${LIBTAILSCALE_GO_SUM_SHA256}"
-    grep -Fxq "require tailscale.com ${LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION}" "${source}/go.mod" \
+    go_mod_requires "${source}/go.mod" tailscale.com "${LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION}" \
         || die "libtailscale ${LIBTAILSCALE_COMMIT} no longer requires tailscale.com ${LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION}; regenerate native/tailscale/go.mod and go.sum"
-    awk -v version="${TAILSCALE_MODULE_VERSION}" '
-        ($1 == "tailscale.com" && $2 == version && NF == 2) ||
-        ($1 == "require" && $2 == "tailscale.com" && $3 == version && NF == 3) { found = 1 }
-        END { exit !found }
-    ' "${ROOT_DIR}/${TAILSCALE_GO_MOD}" || die "native/tailscale/go.mod does not require tailscale.com ${TAILSCALE_MODULE_VERSION}"
+    go_mod_requires "${ROOT_DIR}/${TAILSCALE_GO_MOD}" tailscale.com "${TAILSCALE_MODULE_VERSION}" || die "native/tailscale/go.mod does not require tailscale.com ${TAILSCALE_MODULE_VERSION}"
     cp "${ROOT_DIR}/${TAILSCALE_GO_MOD}" "${source}/go.mod"
     cp "${ROOT_DIR}/${TAILSCALE_GO_SUM}" "${source}/go.sum"
 

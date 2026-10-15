@@ -16,21 +16,24 @@ DEPLOYMENT_TARGET="18.0"
 GO_VERSION="go1.27.1"
 GO_URL="https://go.dev/dl/go1.27.1.darwin-arm64.tar.gz"
 GO_SHA256="ee215d57e0ec269c60cc9ceca68e6bda321ba9ee5afe24f4b0988703c2d87d12"
-# No GOEXPERIMENT: tailscale.com v1.102.5 builds with Go 1.27's default
+# No GOEXPERIMENT: tailscale.com v1.104.1 builds with Go 1.27's default
 # encoding/json/v2.
 
-# libtailscale has no release tags: submodule upstream/libtailscale.
+# libtailscale: submodule upstream/libtailscale, main d1dc45d (binding version
+# 0.2.0; its first commit with the fix for tailscale_getremoteaddr returning
+# another peer's address under concurrent accepts, 258321b). No release tags.
 LIBTAILSCALE_REPO="https://github.com/tailscale/libtailscale"
-LIBTAILSCALE_COMMIT="59d4bb82744915815178e0f0776d60026a397ee7"
-# The commit's go.mod requires tailscale.com v1.94.1; the build replaces its
+LIBTAILSCALE_COMMIT="d1dc45d039edb7759ecbee6ba2aea0c4bca884b8"
+# The commit's go.mod requires tailscale.com v1.104.1; the build replaces its
 # go.mod and go.sum with native/tailscale/go.mod and go.sum
-# (`go get tailscale.com@v1.102.5 && go mod tidy` in that tree with
-# heeler_tailscale.go added), which pin tailscale.com and every transitive
-# module; module hashes are verified by that go.sum.
-LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION="v1.94.1"
-TAILSCALE_MODULE_VERSION="v1.102.5"
-LIBTAILSCALE_GO_MOD_SHA256="b16f5e5aa627ae354d77f4fc1f8b7ea3c0d68c3c2a47590257b622bf11d15bbc"
-LIBTAILSCALE_GO_SUM_SHA256="36aaa5ce20118a55be656de3747c51a959c60bfa61ee031094fe0a67d5cdff94"
+# (`go get tailscale.com@v1.104.1 && go mod tidy` in that tree with
+# heeler_tailscale.go added; identical to the commit's own), which pin
+# tailscale.com and every transitive module; module hashes are verified by
+# that go.sum.
+LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION="v1.104.1"
+TAILSCALE_MODULE_VERSION="v1.104.1"
+LIBTAILSCALE_GO_MOD_SHA256="71b27d3e43394c4722730e1e08a23afff48a691eb1ebec5552dcb7c60bff13d9"
+LIBTAILSCALE_GO_SUM_SHA256="5bd4b5552ddc90f28560bcf155b9384683bfe2df2c60667d831a612794ebc85a"
 
 # ---------------------------------------------------------------------------
 # ZeroTier: libzt (ZeroTierOne + lwIP) as CZeroTier
@@ -103,10 +106,11 @@ GPL3_TEXT_SHA256="3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb369
 
 # GitHub's archive of each pinned commit, with the hashes Heeler's
 # Sources.lock audited before this repository existed (libzt and ZeroTierOne:
-# hashed when they moved to the 1.16.2 pins). The audit downloads
+# hashed when they moved to the 1.16.2 pins; libtailscale: hashed when it
+# moved to d1dc45d). The audit downloads
 # them, checks the hashes, and checks that `git archive` of each submodule
 # commit (what the build compiles) holds exactly the same files.
-LIBTAILSCALE_ARCHIVE_SHA256="471b8be37ef774a5c3d2f35e0f2b1c5e9aba9743f457fb5fa71e25bda92f3953"
+LIBTAILSCALE_ARCHIVE_SHA256="2eb22795f48d672953422cb1f88979d32d3b0e75381d18a0a57857d4e967f408"
 LIBZT_ARCHIVE_SHA256="ba9ade19877d6f35b061600d8e2d0df6d6273f11099f07b05c9d9793fb447e0c"
 ZEROTIERONE_ARCHIVE_SHA256="5f48e6a9492cc2a31f28f9f15e7fad5e1b4a82e95fe451464ff2b32d6bed9fa4"
 LWIP_ARCHIVE_SHA256="49e5a5a1c5b4eedcc749abd60e839d4552618fbbe72a6920447e7dcacb3ea4bf"

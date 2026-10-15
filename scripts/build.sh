@@ -72,7 +72,7 @@ if [[ "${SOURCES_ONLY}" == "1" ]]; then
     fetch_verified go "${GO_URL}" "${GO_SHA256}" >/dev/null
     fetch_verified protoc "${PROTOC_URL}" "${PROTOC_SHA256}" >/dev/null
     export_tree "${ROOT_DIR}/upstream/libtailscale" "${LIBTAILSCALE_COMMIT}" "${scratch}/libtailscale"
-    grep -Fxq "require tailscale.com ${LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION}" "${scratch}/libtailscale/go.mod" \
+    go_mod_requires "${scratch}/libtailscale/go.mod" tailscale.com "${LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION}" \
         || die "libtailscale no longer requires tailscale.com ${LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION}"
     prepare_libzt_source "${scratch}/libzt"
     sync_easytier_source "${scratch}/easytier"

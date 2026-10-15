@@ -19,8 +19,8 @@ the native code, its patches, and the build.
 
 | Component | Pin | Where |
 | --- | --- | --- |
-| libtailscale | commit `59d4bb82744915815178e0f0776d60026a397ee7` (no tags upstream) | submodule `upstream/libtailscale` |
-| tailscale.com | `v1.102.5` (libtailscale's own go.mod says v1.94.1) | `native/tailscale/go.mod`, `go.sum` |
+| libtailscale | commit `d1dc45d039edb7759ecbee6ba2aea0c4bca884b8`, binding version 0.2.0 (no tags upstream) | submodule `upstream/libtailscale` |
+| tailscale.com | `v1.104.1` (the same as libtailscale's own go.mod) | `native/tailscale/go.mod`, `go.sum` |
 | Go | `go1.27.1` darwin-arm64, SHA-256 verified download | `sources.lock` |
 | libzt | tag `1.16.2`, commit `7e5d0f99a2de81c45faa28e44289bcd19d933bf2` (Ylarod/libzt: zerotier/libzt main `a707ea6` plus ZeroTierOne 1.16.2, blocking `zts_node_stop`, opt-in metrics) | submodule `upstream/libzt` |
 | ZeroTierOne | 1.16.2, commit `fc5c3ec22090b5b2a0f274e863651fe9ca489bf4` | libzt's submodule `ext/ZeroTierOne` |
@@ -119,7 +119,7 @@ the same):
 
 - **CTailscale**: the pinned Go archive is extracted into the work directory;
   `git archive` of the libtailscale commit gets `native/tailscale/go.mod` and
-  `go.sum` (after checking the commit still requires tailscale.com v1.94.1)
+  `go.sum` (after checking the commit still requires tailscale.com v1.104.1)
   and `heeler_tailscale.go`; `go build -buildmode=c-archive -trimpath
   -buildvcs=false -tags ios -ldflags "-s -w -buildid="` with `GOTOOLCHAIN=local`,
   `-mod=readonly`, `GOSUMDB=sum.golang.org`, and a clang wrapper per platform.
@@ -190,8 +190,7 @@ the build directory: build where the group matches (a directory under
 `/tmp` belongs to `wheel`; `chgrp staff` it first) when comparing builds.
 The binaries built at this repository's commit `25a0093` are byte-identical
 to the artifacts Heeler accepted at commit `db87976b`
-(`Packages/HeelerOverlay/Artifacts`); CTailscale still is, while CZeroTier
-and CEasyTier have changed since. Check with:
+(`Packages/HeelerOverlay/Artifacts`); all three have changed since. Check with:
 
 ```sh
 scripts/compare-artifacts.sh build/Artifacts <heeler>/Packages/HeelerOverlay/Artifacts
