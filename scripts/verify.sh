@@ -84,7 +84,8 @@ done
 TAILSCALE_SYMBOLS="tailscale_new tailscale_start tailscale_close tailscale_dial
     tailscale_status_json tailscale_errmsg tailscale_set_dir tailscale_set_logfd
     heeler_tailscale_disable_log_upload heeler_tailscale_log_upload_state
-    heeler_tailscale_logout"
+    heeler_tailscale_logout heeler_tailcat_address_info heeler_tailcat_open
+    heeler_tailcat_dial heeler_tailcat_ping heeler_tailcat_close"
 ZEROTIER_SYMBOLS="zts_init_from_memory zts_node_start zts_node_get_id_pair zts_net_join
     zts_net_leave zts_bsd_socket zts_bsd_connect zts_bsd_poll zts_bsd_close
     zts_id_new zts_id_pair_is_valid zts_node_get_id zts_moon_orbit zts_moon_deorbit
@@ -128,6 +129,12 @@ int (*const ts_log_upload_state)(void) = heeler_tailscale_log_upload_state;
 int (*const ts_logout)(int, int) = heeler_tailscale_logout;
 int (*const ts_status)(tailscale, char **) = tailscale_status_json;
 int (*const ts_dial)(tailscale, const char *, const char *, tailscale_conn *) = tailscale_dial;
+int (*const tc_address_info)(const char *, char *, size_t) = heeler_tailcat_address_info;
+int (*const tc_open)(const char *, int, char *, size_t) = heeler_tailcat_open;
+int (*const tc_dial)(int, uint16_t, uint32_t, char *, size_t) = heeler_tailcat_dial;
+int (*const tc_ping)(int, uint32_t, char *, size_t, char *, size_t) = heeler_tailcat_ping;
+int (*const tc_close)(int) = heeler_tailcat_close;
+_Static_assert(HEELER_TAILCAT_ERR_ADDRESS == -4, "the tailcat result codes changed");
 EOF
 
 for slice in ios-arm64 ios-arm64-simulator; do
@@ -179,10 +186,12 @@ has() {
     grep -Fq -- "$1" "${provenance}" || die "PROVENANCE.md does not record: $1"
 }
 has "libtailscale: commit ${LIBTAILSCALE_COMMIT}"
-for glue in native/tailscale/heeler_tailscale.go native/zerotier/heeler_zerotier.cpp native/zerotier/heeler_zerotier.h; do
+for glue in native/tailscale/heeler_tailscale.go native/tailscale/heeler_tailcat.go \
+    native/zerotier/heeler_zerotier.cpp native/zerotier/heeler_zerotier.h; do
     has "${glue} (sha256 $(sha256_of "${ROOT_DIR}/${glue}"))"
 done
 has "tailscale.com: ${TAILSCALE_MODULE_VERSION}"
+has "tailcat: ${TAILCAT_MODULE_VERSION}"
 has "native/tailscale/go.mod sha256 ${LIBTAILSCALE_GO_MOD_SHA256}"
 has "native/tailscale/go.sum sha256 ${LIBTAILSCALE_GO_SUM_SHA256}"
 has "Go toolchain: ${GO_VERSION}, darwin-arm64 archive sha256 ${GO_SHA256}"

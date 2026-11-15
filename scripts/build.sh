@@ -74,9 +74,11 @@ if [[ "${SOURCES_ONLY}" == "1" ]]; then
     export_tree "${ROOT_DIR}/upstream/libtailscale" "${LIBTAILSCALE_COMMIT}" "${scratch}/libtailscale"
     go_mod_requires "${scratch}/libtailscale/go.mod" tailscale.com "${LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION}" \
         || die "libtailscale no longer requires tailscale.com ${LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION}"
+    go_mod_requires "${ROOT_DIR}/${TAILSCALE_GO_MOD}" github.com/tailscale/tailcat "${TAILCAT_MODULE_VERSION}" \
+        || die "native/tailscale/go.mod does not require github.com/tailscale/tailcat ${TAILCAT_MODULE_VERSION}"
     prepare_libzt_source "${scratch}/libzt"
     sync_easytier_source "${scratch}/easytier"
-    echo "Verified the submodule pins, Go ${GO_VERSION}, protoc ${PROTOC_VERSION}, the go.mod/go.sum overrides, the libzt and EasyTier patches, and the committed licence texts."
+    echo "Verified the submodule pins, Go ${GO_VERSION}, protoc ${PROTOC_VERSION}, the go.mod/go.sum overrides and their tailcat ${TAILCAT_MODULE_VERSION} requirement, the libzt and EasyTier patches, and the committed licence texts."
     exit 0
 fi
 

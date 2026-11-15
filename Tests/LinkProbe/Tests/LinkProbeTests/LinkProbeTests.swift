@@ -13,6 +13,37 @@ struct LinkProbeTests {
         #expect(result.close == 0)
     }
 
+    @Test func tailcatDescribesAnAddress() {
+        #expect(
+            LinkProbe.tailcatAddressInfo(LinkProbe.TailcatAddress.relayRegion)
+                == #"{"preshared_key":true,"region_id":1,"relays":[]}"#)
+        #expect(
+            LinkProbe.tailcatAddressInfo(LinkProbe.TailcatAddress.ownRelay)
+                == #"{"preshared_key":true,"region_id":null,"relays":["relay.invalid"]}"#)
+    }
+
+    @Test func tailcatRefusesWhatIsNotAnAddress() {
+        #expect(LinkProbe.tailcatAddressInfo("tc-not-an-address") == "error -4")  // HEELER_TAILCAT_ERR_ADDRESS
+        let open = LinkProbe.tailcatOpenInvalid()
+        #expect(open.code == -4)
+        #expect(!open.message.isEmpty)
+        #expect(!open.message.contains("tc-not-an-address"))
+    }
+
+    @Test func tailcatClientOpensAndCloses() {
+        let result = LinkProbe.tailcatOpenAndClose()
+        #expect(result.handle > 0)
+        #expect(result.close == 0)
+        #expect(result.closeAgain == -3)  // HEELER_TAILCAT_ERR_CLOSED
+        #expect(result.dial == -3)
+    }
+
+    @Test func tailcatDialBuildsTheTunnelAndTimesOut() {
+        let result = LinkProbe.tailcatDialBuildsTheTunnelAndTimesOut()
+        #expect(result.dial == -2, "\(result.message)")  // HEELER_TAILCAT_ERR_TIMEOUT
+        #expect(result.close == 0)
+    }
+
     @Test func zeroTierGeneratesAValidIdentity() {
         let result = LinkProbe.zeroTierIdentity()
         #expect(result.created == 0)

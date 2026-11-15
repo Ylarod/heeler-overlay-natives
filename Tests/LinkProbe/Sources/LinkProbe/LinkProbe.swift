@@ -3,7 +3,8 @@ import CTailscale
 import CZeroTier
 
 /// Thin wrappers over entry points of each binary target that run without a
-/// network or a started node.
+/// network. Only the tailcat dial starts anything: a client whose relay does
+/// not exist.
 public enum LinkProbe {
     /// Turns Tailscale log upload off inside the Go runtime and reports
     /// heeler_tailscale_log_upload_state (3: both switches are off).
@@ -16,6 +17,54 @@ public enum LinkProbe {
     public static func tailscaleNewAndClose() -> (handle: Int32, close: Int32) {
         let handle = tailscale_new()
         return (handle, tailscale_close(handle))
+    }
+
+    /// Two tailcat addresses made for these tests. Their keys were generated
+    /// and thrown away; no server ever held them.
+    /// - `relayRegion` names region 1 of the relay map a client fetches.
+    /// - `ownRelay` names its own relay, `relay.invalid`, which resolves
+    ///   nowhere, so a client of it starts without the network.
+    public enum TailcatAddress {
+        public static let relayRegion =
+            "tcpGFwWCBkoZFXSg4dBEdu4fjp2tm_BpZE5eiKlg3c-8pmFAIjAmFrWCB8zkWp5aaTXSRcU06s9WMJGxXVKGSf_UnkJQQtykEJT2FxWCBHZRmok7n2yjBJAVp9f2iOZjW1bEKJ0KVcOtYcTSIEiWFpAQ"
+        public static let ownRelay =
+            "tcpGFwWCDJasIaRszpCko-hlUp2muXWmw3lURRsH4SquxEm1SMJWFrWCCNPTH_iqWLhoZkURv5dX87UdtrW9annrwc8Fls-LyqQ2FxWCC7FUJAhPio8tZBoLluGTPzjyag1n6R27A913ipuAUlhWFygaFhToGhYWhtcmVsYXkuaW52YWxpZA"
+    }
+
+    /// heeler_tailcat_address_info: the JSON for an address, or its error code.
+    public static func tailcatAddressInfo(_ address: String) -> String {
+        var buffer = [CChar](repeating: 0, count: 512)
+        let length = heeler_tailcat_address_info(address, &buffer, buffer.count)
+        guard length >= 0, length < buffer.count else { return "error \(length)" }
+        return String(decoding: buffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
+    /// heeler_tailcat_open with text that is not a tailcat address.
+    public static func tailcatOpenInvalid() -> (code: Int32, message: String) {
+        var error = [CChar](repeating: 0, count: 256)
+        let code = heeler_tailcat_open("tc-not-an-address", -1, &error, error.count)
+        return (code, String(decoding: error.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
+    }
+
+    /// Opens a client and closes it twice without using it, then dials on
+    /// the closed handle.
+    public static func tailcatOpenAndClose() -> (handle: Int32, close: Int32, closeAgain: Int32, dial: Int32) {
+        let handle = heeler_tailcat_open(TailcatAddress.relayRegion, -1, nil, 0)
+        let close = heeler_tailcat_close(handle)
+        let closeAgain = heeler_tailcat_close(handle)
+        let dial = heeler_tailcat_dial(handle, 22, 100, nil, 0)
+        return (handle, close, closeAgain, dial)
+    }
+
+    /// A dial that builds the client's WireGuard engine and userspace
+    /// network stack and then runs into its timeout: the address names a
+    /// relay that resolves nowhere, so no server can answer.
+    public static func tailcatDialBuildsTheTunnelAndTimesOut() -> (dial: Int32, message: String, close: Int32) {
+        var error = [CChar](repeating: 0, count: 256)
+        let handle = heeler_tailcat_open(TailcatAddress.ownRelay, -1, nil, 0)
+        let dial = heeler_tailcat_dial(handle, 22, 300, &error, error.count)
+        let close = heeler_tailcat_close(handle)
+        return (dial, String(decoding: error.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self), close)
     }
 
     /// Generates a ZeroTier identity and checks it with libzt.
