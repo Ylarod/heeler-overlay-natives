@@ -26,14 +26,20 @@ LIBTAILSCALE_REPO="https://github.com/tailscale/libtailscale"
 LIBTAILSCALE_COMMIT="d1dc45d039edb7759ecbee6ba2aea0c4bca884b8"
 # The commit's go.mod requires tailscale.com v1.104.1; the build replaces its
 # go.mod and go.sum with native/tailscale/go.mod and go.sum
-# (`go get tailscale.com@v1.104.1 && go mod tidy` in that tree with
-# heeler_tailscale.go added; identical to the commit's own), which pin
-# tailscale.com and every transitive module; module hashes are verified by
-# that go.sum.
+# (`go get tailscale.com@v1.104.1 github.com/tailscale/tailcat@v0.7.0 &&
+# go mod tidy` in that tree with heeler_tailscale.go and heeler_tailcat.go
+# added), which pin tailscale.com, tailcat, and every transitive module;
+# module hashes are verified by that go.sum.
 LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION="v1.104.1"
 TAILSCALE_MODULE_VERSION="v1.104.1"
-LIBTAILSCALE_GO_MOD_SHA256="71b27d3e43394c4722730e1e08a23afff48a691eb1ebec5552dcb7c60bff13d9"
-LIBTAILSCALE_GO_SUM_SHA256="5bd4b5552ddc90f28560bcf155b9384683bfe2df2c60667d831a612794ebc85a"
+# tailcat (github.com/tailscale/tailcat): the client behind the
+# heeler_tailcat_* entry points, linked into the same archive. v0.7.0
+# requires an older tailscale.com (v1.103.0-pre) than the pin above, so
+# adding it moves no other module: the commit's go.mod gains one require
+# line and its go.sum two hashes.
+TAILCAT_MODULE_VERSION="v0.7.0"
+LIBTAILSCALE_GO_MOD_SHA256="a633334b250ee186aefdc3e9a6432059c70560430c4881389787ad0ec3aa32f1"
+LIBTAILSCALE_GO_SUM_SHA256="cfd0ef0bc6a413b88324c6f21b8e90ad71606f1d5dfb681933bdcb8f3d289e22"
 
 # ---------------------------------------------------------------------------
 # ZeroTier: libzt (ZeroTierOne + lwIP) as CZeroTier

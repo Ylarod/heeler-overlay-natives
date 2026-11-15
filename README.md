@@ -6,7 +6,7 @@ XCFrameworks and published as a Swift package:
 
 | Product | Built from | What Heeler uses it for |
 | --- | --- | --- |
-| `CTailscale` | libtailscale (tsnet, Go `c-archive`) + `native/tailscale` | One tsnet node per tailnet; dials TCP for SSH. |
+| `CTailscale` | libtailscale (tsnet, Go `c-archive`) + tailcat + `native/tailscale` | One tsnet node per tailnet; dials TCP for SSH. Also tailcat clients: one tunnel per `tailcat serve` peer, with no tailnet. |
 | `CZeroTier` | libzt (ZeroTierOne + lwIP, C++) + `native/zerotier` | One ZeroTier node per process; networks, moons, self-hosted planets; each connection bound to its network's interface, so networks that assign the same address stay apart. |
 | `CEasyTier` | EasyTier (Rust, smoltcp, no TUN) through the `heeler-easytier` crate in `native/easytier` | Any number of networks side by side, one EasyTier instance per instance key (C ABI v2), each manual or from a config server; a config server may assign up to eight; a dial picks the one the destination fits. |
 
@@ -21,6 +21,7 @@ the native code, its patches, and the build.
 | --- | --- | --- |
 | libtailscale | commit `d1dc45d039edb7759ecbee6ba2aea0c4bca884b8`, binding version 0.2.0 (no tags upstream) | submodule `upstream/libtailscale` |
 | tailscale.com | `v1.104.1` (the same as libtailscale's own go.mod) | `native/tailscale/go.mod`, `go.sum` |
+| tailcat | `v0.7.0` (Go module `github.com/tailscale/tailcat`) | `native/tailscale/go.mod`, `go.sum` |
 | Go | `go1.27.1` darwin-arm64, SHA-256 verified download | `sources.lock` |
 | libzt | tag `1.16.2`, commit `7e5d0f99a2de81c45faa28e44289bcd19d933bf2` (Ylarod/libzt: zerotier/libzt main `a707ea6` plus ZeroTierOne 1.16.2, blocking `zts_node_stop`, opt-in metrics) | submodule `upstream/libzt` |
 | ZeroTierOne | 1.16.2, commit `fc5c3ec22090b5b2a0f274e863651fe9ca489bf4` | libzt's submodule `ext/ZeroTierOne` |
@@ -41,7 +42,8 @@ sources.lock            every pin and hash (shell syntax, sourced by the scripts
 upstream/               git submodules: libtailscale, libzt (+ ext/*), EasyTier
 patches/libzt/          patches to libzt and its ZeroTierOne submodule
 patches/easytier/       patches to EasyTier
-native/tailscale/       heeler_tailscale.go, and the go.mod/go.sum that replace libtailscale's
+native/tailscale/       heeler_tailscale.go, heeler_tailcat.go, and the go.mod/go.sum that
+                        replace libtailscale's
 native/zerotier/        heeler_zerotier.cpp/.h, compiled into libzt's src/
 native/easytier/        the heeler-easytier crate: Cargo.lock, rust-toolchain.toml,
                         src/, include/heeler_easytier.h, examples/, notice tooling
@@ -58,10 +60,44 @@ The glue sources started as byte-identical copies of the ones Heeler
 audited at `db87976b`; their comments still name Heeler's former paths
 (`NativeSupport/...`). `native/tailscale/heeler_tailscale.go` is unchanged
 since; `native/zerotier/heeler_zerotier.*` and the `heeler-easytier` crate
-have changed here (see "Native interfaces").
+have changed here, and `native/tailscale/heeler_tailcat.go` was written
+here (see "Native interfaces").
 
 ## Native interfaces
 
+- **CTailscale** adds to libtailscale: `heeler_tailscale_disable_log_upload`,
+  `heeler_tailscale_log_upload_state`, `heeler_tailscale_logout`, and a
+  [tailcat](https://github.com/tailscale/tailcat) client (see
+  `CTailscale.h`). tailcat reaches one `tailcat serve` peer through a
+  WireGuard tunnel set up over a DERP relay, with no tailnet and no
+  coordination server; the server's tailcat address holds everything the
+  client needs, including (by default) the tunnel's pre-shared key, so the
+  address is a secret and the glue never logs it or returns it in a
+  message.
+  - `heeler_tailcat_address_info(address, buf, len)` describes an address
+    without the network: whether it carries a pre-shared key, and the relay
+    region or relay host names it names. The JSON holds no key.
+  - `heeler_tailcat_open(address, log_fd, err, errlen)` returns a client
+    handle: one tunnel to one server, started by the first dial or ping.
+    Its log is tailcat's and Tailscale's own lines; they name the server's
+    public keys, not the pre-shared key.
+  - `heeler_tailcat_dial(client, port, timeout_ms, err, errlen)` returns a
+    connected descriptor for the port `tailcat serve <port>` exposes, made
+    by libtailscale's own `newConn`, so it is the same kind
+    `tailscale_dial` stores.
+  - `heeler_tailcat_ping(client, timeout_ms, buf, len, err, errlen)` reports
+    the path's latency and whether it is direct or through a relay.
+  - `heeler_tailcat_close(client)` closes the tunnel and its streams and
+    interrupts calls waiting on the handle.
+
+  The client is built from the data plane tsnet already links (WireGuard,
+  magicsock, DERP, netstack), which is why it lives in this archive: it
+  adds about 0.26 MB to the linked binary, where an archive of its own
+  would add about 14.6 MB and a second Go runtime. tailcat turns
+  Tailscale's socket binding (`netns`) off for the whole process when a
+  client builds its engine, which tsnet does not do; the glue turns it back
+  on after every dial and ping, so tsnet nodes keep binding their sockets
+  to the default route's interface.
 - **CZeroTier** adds to libzt: `heeler_zt_peers`, `heeler_zt_planet_inspect`,
   `heeler_zt_add_moon` (see `heeler_zerotier.h`), and for joined networks
   that assign the node the same address:
@@ -119,8 +155,9 @@ the same):
 
 - **CTailscale**: the pinned Go archive is extracted into the work directory;
   `git archive` of the libtailscale commit gets `native/tailscale/go.mod` and
-  `go.sum` (after checking the commit still requires tailscale.com v1.104.1)
-  and `heeler_tailscale.go`; `go build -buildmode=c-archive -trimpath
+  `go.sum` (after checking the commit still requires tailscale.com v1.104.1
+  and the go.mod requires tailcat v0.7.0), `heeler_tailscale.go`, and
+  `heeler_tailcat.go`; `go build -buildmode=c-archive -trimpath
   -buildvcs=false -tags ios -ldflags "-s -w -buildid="` with `GOTOOLCHAIN=local`,
   `-mod=readonly`, `GOSUMDB=sum.golang.org`, and a clang wrapper per platform.
   `go mod verify` re-checks the shared module cache against `go.sum`.
@@ -204,8 +241,8 @@ for the corresponding source.
 - `scripts/build.sh --sources-only` checks the submodule pins against
   `sources.lock` (including libzt's nested gitlinks and the repository URLs in
   libzt's `.gitmodules`), the Go download, the go.mod/go.sum and licence
-  hashes, and that every patch is listed, matches its hash, and applies with
-  `--fuzz=0`.
+  hashes, the go.mod's tailcat requirement, and that every patch is listed,
+  matches its hash, and applies with `--fuzz=0`.
 - `scripts/audit-upstream.sh` downloads GitHub's archive of every pinned
   commit, checks it against the SHA-256 Heeler originally audited
   (`*_ARCHIVE_SHA256`), and checks that `git archive` of the submodule commit
@@ -214,6 +251,7 @@ for the corresponding source.
   that no unlisted file exists), the two arm64 slices, `minos`, platform, and
   architecture of every object, every exported entry point Heeler uses
   (including `heeler_tailscale_logout`, `heeler_tailscale_disable_log_upload`,
+  the five `heeler_tailcat_*` functions,
   `heeler_zt_peers`, `heeler_zt_planet_inspect`, `heeler_zt_add_moon`,
   `heeler_zt_bind_network`, `heeler_zt_network_reaches`, `heeler_et_stop_all`,
   and `heeler_et_web_start`), the C types of those declarations (compiled
@@ -268,11 +306,20 @@ cargo run --locked --release --example multi-peer -- --web vendor/easytier/targe
 2. **Refresh patches** against the new tree; `scripts/build.sh --sources-only`
    must pass with `--fuzz=0`. Update the hashes in `sources.lock`.
 3. **Tailscale**: in a `git archive` copy of libtailscale with
-   `heeler_tailscale.go` added, using the pinned Go:
+   `heeler_tailscale.go` and `heeler_tailcat.go` added, using the pinned Go:
    `GOTOOLCHAIN=local GOFLAGS=-modcacherw GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go get tailscale.com@<version> && go mod tidy`;
    copy `go.mod`/`go.sum` to `native/tailscale/`, update
    `TAILSCALE_MODULE_VERSION` and both hashes, and review the module diff
-   and the `ipnstate.Status` fields Heeler reads.
+   and the `ipnstate.Status` fields Heeler reads. **tailcat** moves the
+   same way (`go get github.com/tailscale/tailcat@<version>`,
+   `TAILCAT_MODULE_VERSION`).
+   Each tailcat release requires a tailscale.com of its own, usually an
+   unreleased one; when that is newer than `TAILSCALE_MODULE_VERSION`, Go
+   selects it for the whole archive and tsnet moves with it, so check
+   `go list -m tailscale.com` afterwards. tailcat promises no stable Go
+   API or wire format: read its changelog, and check that the glue still
+   reaches a server of the new version, and what `createEngine` does to
+   process-wide state such as `netns`.
 4. **EasyTier 2.7.0 release**: point the submodule at `v2.7.0`, refresh the
    patches, regenerate `native/easytier/Cargo.lock`
    (`scripts/easytier-dev.sh && cd native/easytier && cargo update -p easytier`),
@@ -349,8 +396,8 @@ Both select Xcode 26.6 through `DEVELOPER_DIR`.
   later (`native/easytier/LICENSE` with the LGPL-3.0 text,
   `licenses/gpl-3.0.txt` for the GPL it supplements, and
   `native/easytier/NOTICE.txt`).
-- Upstream components keep their own licences: libtailscale, Tailscale, and
-  Go are BSD-3-Clause (other Go modules as listed in
+- Upstream components keep their own licences: libtailscale, Tailscale,
+  tailcat, and Go are BSD-3-Clause (other Go modules as listed in
   `Tailscale-Go-modules.txt`); libzt is BUSL-1.1 converted to Apache-2.0 on
   its Change Date (2026-01-01); ZeroTierOne 1.16's core (`node/`, `osdep/`)
   is MPL-2.0 (its source-available `nonfree/` controller is never compiled,

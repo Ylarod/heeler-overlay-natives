@@ -2,6 +2,7 @@
 # CTailscale: libtailscale as a Go c-archive. Sourced by scripts/build.sh.
 
 TAILSCALE_GO_FILE="native/tailscale/heeler_tailscale.go"
+TAILCAT_GO_FILE="native/tailscale/heeler_tailcat.go"
 TAILSCALE_GO_MOD="native/tailscale/go.mod"
 TAILSCALE_GO_SUM="native/tailscale/go.sum"
 
@@ -21,10 +22,11 @@ tailscale_fingerprint() {
     echo "libtailscale: ${LIBTAILSCALE_COMMIT}"
     echo "go: ${GO_VERSION} ${GO_URL} ${GO_SHA256}"
     echo "tailscale.com: ${LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION} -> ${TAILSCALE_MODULE_VERSION} ${LIBTAILSCALE_GO_MOD_SHA256} ${LIBTAILSCALE_GO_SUM_SHA256}"
+    echo "tailcat: ${TAILCAT_MODULE_VERSION}"
     echo "goproxy: ${HEELER_NATIVES_GOPROXY:-https://proxy.golang.org}"
     apple_toolchain_fingerprint
     hash_files scripts/build.sh scripts/lib/common.sh scripts/lib/tailscale.sh \
-        "${TAILSCALE_GO_FILE}" "${TAILSCALE_GO_MOD}" "${TAILSCALE_GO_SUM}" \
+        "${TAILSCALE_GO_FILE}" "${TAILCAT_GO_FILE}" "${TAILSCALE_GO_MOD}" "${TAILSCALE_GO_SUM}" \
         include/CTailscale/CTailscale.h include/CTailscale/module.modulemap
 }
 
@@ -51,6 +53,7 @@ build_tailscale() {
     go_mod_requires "${source}/go.mod" tailscale.com "${LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION}" \
         || die "libtailscale ${LIBTAILSCALE_COMMIT} no longer requires tailscale.com ${LIBTAILSCALE_UPSTREAM_TAILSCALE_VERSION}; regenerate native/tailscale/go.mod and go.sum"
     go_mod_requires "${ROOT_DIR}/${TAILSCALE_GO_MOD}" tailscale.com "${TAILSCALE_MODULE_VERSION}" || die "native/tailscale/go.mod does not require tailscale.com ${TAILSCALE_MODULE_VERSION}"
+    go_mod_requires "${ROOT_DIR}/${TAILSCALE_GO_MOD}" github.com/tailscale/tailcat "${TAILCAT_MODULE_VERSION}" || die "native/tailscale/go.mod does not require github.com/tailscale/tailcat ${TAILCAT_MODULE_VERSION}"
     cp "${ROOT_DIR}/${TAILSCALE_GO_MOD}" "${source}/go.mod"
     cp "${ROOT_DIR}/${TAILSCALE_GO_SUM}" "${source}/go.sum"
 
@@ -59,6 +62,13 @@ build_tailscale() {
     # and heeler_tailscale_logout.
     [[ ! -e "${source}/heeler_tailscale.go" ]] || die "libtailscale already contains heeler_tailscale.go"
     cp "${ROOT_DIR}/${TAILSCALE_GO_FILE}" "${source}/heeler_tailscale.go"
+
+    # heeler_tailcat.go joins it too: the tailcat client behind
+    # heeler_tailcat_address_info, _open, _dial, _ping, and _close. It reuses
+    # libtailscale's newConn, so a tailcat stream is the same socketpair
+    # descriptor tailscale_dial stores.
+    [[ ! -e "${source}/heeler_tailcat.go" ]] || die "libtailscale already contains heeler_tailcat.go"
+    cp "${ROOT_DIR}/${TAILCAT_GO_FILE}" "${source}/heeler_tailcat.go"
 
     (
         export GOROOT="${work}/go"
@@ -137,8 +147,8 @@ build_tailscale() {
         local module_notice="${notices}/Tailscale-Go-modules.txt"
         {
             echo "Third-party Go modules linked into CTailscale (libtailscale ${LIBTAILSCALE_COMMIT},"
-            echo "tailscale.com ${TAILSCALE_MODULE_VERSION}, ${GO_VERSION}). Each module's licence"
-            echo "files follow verbatim."
+            echo "tailscale.com ${TAILSCALE_MODULE_VERSION}, tailcat ${TAILCAT_MODULE_VERSION}, ${GO_VERSION}). Each"
+            echo "module's licence files follow verbatim."
         } > "${module_notice}"
         local module_path module_version module_dir licence_files licence_file
         while read -r module_path module_version module_dir; do
@@ -168,6 +178,8 @@ build_tailscale() {
 - libtailscale: commit ${LIBTAILSCALE_COMMIT} (no release tag; submodule upstream/libtailscale, ${LIBTAILSCALE_REPO})
 - libtailscale addition: ${TAILSCALE_GO_FILE} (sha256 $(sha256_of "${ROOT_DIR}/${TAILSCALE_GO_FILE}")) in package main; exports heeler_tailscale_disable_log_upload (envknob.SetNoLogsNoSupport + logtail.Disable), heeler_tailscale_log_upload_state, and heeler_tailscale_logout (LocalClient.Logout)
 - tailscale.com: ${TAILSCALE_MODULE_VERSION} (libtailscale's go.mod and go.sum replaced by ${TAILSCALE_GO_MOD} sha256 ${LIBTAILSCALE_GO_MOD_SHA256} and ${TAILSCALE_GO_SUM} sha256 ${LIBTAILSCALE_GO_SUM_SHA256}; module hashes verified by that go.sum)
+- tailcat: ${TAILCAT_MODULE_VERSION} (the github.com/tailscale/tailcat Go module, required by that go.mod)
+- tailcat addition: ${TAILCAT_GO_FILE} (sha256 $(sha256_of "${ROOT_DIR}/${TAILCAT_GO_FILE}")) in package main; exports heeler_tailcat_address_info, heeler_tailcat_open, heeler_tailcat_dial, heeler_tailcat_ping, and heeler_tailcat_close
 - Go toolchain: ${GO_VERSION}, darwin-arm64 archive sha256 ${GO_SHA256}
 - Go experiment: none (GOEXPERIMENT unset)
 - Go build: -buildmode=c-archive -trimpath -tags ios -ldflags "-s -w -buildid="
