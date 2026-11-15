@@ -96,8 +96,11 @@ build_easytier() {
     local objcopy
     objcopy="$(rustc +"${toolchain}" --print sysroot)/lib/rustlib/$(rustc +"${toolchain}" -vV | sed -n 's/^host: //p')/bin/rust-objcopy"
     [[ -x "${objcopy}" ]] || die "rust-objcopy not found at ${objcopy}"
-    local cargo_home
-    cargo_home="$(cd "${CARGO_HOME:-${HOME}/.cargo}" && pwd -P)"
+    # cargo creates its home on first use; a machine whose rustup lives
+    # elsewhere (Homebrew) and that restored no cache does not have it yet.
+    local cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
+    mkdir -p "${cargo_home}"
+    cargo_home="$(cd "${cargo_home}" && pwd -P)"
     local scratch="${work}/scratch"
     rm -rf "${scratch}"
     mkdir -p "${scratch}"
