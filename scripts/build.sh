@@ -178,8 +178,9 @@ else
         cat <<EOF
 # Overlay native artifact provenance
 
-Built by scripts/build.sh of https://github.com/Ylarod/heeler-overlay-natives;
-paths below are relative to that repository.
+Built by scripts/build.sh of
+https://github.com/ZingerLittleBee/heeler-overlay-natives; paths below are
+relative to that repository.
 
 ## Build environment
 

@@ -335,7 +335,7 @@ cargo run --locked --release --example multi-peer -- --web vendor/easytier/targe
 
 A release is a tag `v<version>` whose commit carries a generated
 `Package.swift`: each binary target downloads
-`https://github.com/Ylarod/heeler-overlay-natives/releases/download/v<version>/<Framework>.xcframework.zip`
+`https://github.com/ZingerLittleBee/heeler-overlay-natives/releases/download/v<version>/<Framework>.xcframework.zip`
 and SwiftPM checks it against the recorded checksum. The main branch keeps
 the development manifest (paths into `build/Artifacts`), so a release commit
 sits on top of the commit it was built from and is reachable through its tag.
@@ -362,7 +362,7 @@ Two ways to cut one:
   creates the GitHub release with the assets.
 
 Heeler then depends on the package with
-`.package(url: "https://github.com/Ylarod/heeler-overlay-natives", exact: "<version>")`
+`.package(url: "https://github.com/ZingerLittleBee/heeler-overlay-natives", exact: "<version>")`
 and the products `CTailscale`, `CZeroTier`, and `CEasyTier`, and copies
 `Notices.zip`'s notices into its bundled notices (its `LicenseNoticeTests`
 compare them).

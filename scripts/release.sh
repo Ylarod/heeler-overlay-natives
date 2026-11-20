@@ -64,5 +64,5 @@ Nothing was pushed. To publish:
       --notes-file <(cat build/dist/${TAG}/checksums.txt) build/dist/${TAG}/*
 
 Consumers then depend on:
-  .package(url: "https://github.com/Ylarod/heeler-overlay-natives", exact: "${VERSION}")
+  .package(url: "https://github.com/ZingerLittleBee/heeler-overlay-natives", exact: "${VERSION}")
 EOF

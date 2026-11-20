@@ -109,7 +109,7 @@ build_zerotier() {
 Heeler modifies libzt (commit ${LIBZT_COMMIT}) and its ZeroTierOne
 submodule (commit ${ZEROTIERONE_COMMIT}) before building CZeroTier, with the
 patches below, applied in order. They are kept in patches/libzt of
-https://github.com/Ylarod/heeler-overlay-natives; the release tag the
+https://github.com/ZingerLittleBee/heeler-overlay-natives; the release tag the
 CZeroTier binary was published under holds the exact patches, the pinned
 upstream submodules, and the build scripts. Each file a patch changes carries
 a "Modified by Heeler contributors" notice. libzt is used under the Apache

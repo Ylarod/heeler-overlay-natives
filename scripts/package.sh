@@ -21,7 +21,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
 TAG="${1:?usage: scripts/package.sh <tag> [artifacts-dir]}"
 [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || die "tag must look like v1.2.3 (got ${TAG})"
 ARTIFACTS="$(cd "${2:-${BUILD_DIR}/Artifacts}" && pwd -P)"
-REPOSITORY="${HEELER_NATIVES_REPOSITORY:-https://github.com/Ylarod/heeler-overlay-natives}"
+REPOSITORY="${HEELER_NATIVES_REPOSITORY:-https://github.com/ZingerLittleBee/heeler-overlay-natives}"
 DIST="${BUILD_DIR}/dist/${TAG}"
 
 "${ROOT_DIR}/scripts/verify.sh" "${ARTIFACTS}"
